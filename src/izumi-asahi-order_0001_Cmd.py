@@ -10,6 +10,8 @@ from typing import Iterable
 START_MESSAGE = "izumi-asahi-order_0001 started"
 TARGET_SHEET_KEYWORD = "BY"
 CODE_HEADER_VALUE = "コード"
+INCORRECT_VENDOR_NAME = "ショクリュ-"
+CORRECT_VENDOR_NAME = "ショクリュー"
 USAGE = "Usage: python src/izumi-asahi-order_0001_Cmd.py <excel_file_path>"
 
 
@@ -29,6 +31,16 @@ def build_step0001_output_path(tsv_path: Path) -> Path:
 def build_error_output_path(step_output_path: Path) -> Path:
     """step0001処理のエラー出力パスを作成する。"""
     return step_output_path.with_name(f"{step_output_path.stem}_error.txt")
+
+
+def build_step0002_output_path(step0001_path: Path) -> Path:
+    """step0002 TSVの出力パスを作成する。"""
+    if step0001_path.stem.endswith("_step0001"):
+        output_stem = f"{step0001_path.stem.removesuffix('_step0001')}_step0002"
+    else:
+        output_stem = f"{step0001_path.stem}_step0002"
+
+    return step0001_path.with_name(f"{output_stem}.tsv")
 
 
 def normalize_cell_value(value: object) -> str:
@@ -119,6 +131,41 @@ def extract_rows_after_code_until_blank(
     return detail_rows
 
 
+def normalize_vendor_name_in_a_column(row: list[str]) -> list[str]:
+    """A列の業者名表記を必要に応じて修正する。"""
+    if row and row[0].strip() == INCORRECT_VENDOR_NAME:
+        normalized_row = row.copy()
+        normalized_row[0] = CORRECT_VENDOR_NAME
+        return normalized_row
+
+    return row
+
+
+def process_step0002_tsv(step0001_path: Path) -> Path | None:
+    """step0001 TSVのA列業者名を修正しstep0002 TSVを出力する。"""
+    step0002_output_path = build_step0002_output_path(step0001_path)
+    error_output_path = build_error_output_path(step0002_output_path)
+
+    if not step0001_path.exists():
+        message = f"Error: file not found: {step0001_path}"
+        print(message)
+        write_error_file(error_output_path, message)
+        return None
+
+    try:
+        rows = read_tsv(step0001_path)
+        normalized_rows = [normalize_vendor_name_in_a_column(row) for row in rows]
+        write_rows_to_tsv(normalized_rows, step0002_output_path)
+    except OSError as error:
+        message = f"Error: failed to process TSV file: {step0001_path}: {error}"
+        print(message)
+        write_error_file(error_output_path, message)
+        return None
+
+    print(f"Exported step0002 TSV to '{step0002_output_path}'")
+    return step0002_output_path
+
+
 def process_step0001_tsv(tsv_path: Path) -> Path | None:
     """TSVから店舗コード行・見出し行・明細行を抽出しstep0001 TSVを出力する。"""
     step_output_path = build_step0001_output_path(tsv_path)
@@ -195,7 +242,9 @@ def main() -> int:
 
     tsv_paths = export_by_sheets_to_tsv(excel_path)
     for tsv_path in tsv_paths:
-        process_step0001_tsv(tsv_path)
+        step0001_path = process_step0001_tsv(tsv_path)
+        if step0001_path is not None:
+            process_step0002_tsv(step0001_path)
 
     return 0
 
