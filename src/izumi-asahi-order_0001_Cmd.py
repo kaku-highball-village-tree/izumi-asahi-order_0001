@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-
 START_MESSAGE = "izumi-asahi-order_0001 started"
 TARGET_SHEET_KEYWORD = "BY"
+CODE_HEADER_VALUE = "コード"
 USAGE = "Usage: python src/izumi-asahi-order_0001_Cmd.py <excel_file_path>"
 
 
@@ -21,12 +21,35 @@ def build_output_path(excel_path: Path, sheet_index: int) -> Path:
     return excel_path.with_name(f"{excel_path.stem}_{sheet_index:04d}.tsv")
 
 
+def build_step0001_output_path(tsv_path: Path) -> Path:
+    """step0001 TSVの出力パスを作成する。"""
+    return tsv_path.with_name(f"{tsv_path.stem}_step0001.tsv")
+
+
+def build_error_output_path(step_output_path: Path) -> Path:
+    """step0001処理のエラー出力パスを作成する。"""
+    return step_output_path.with_name(f"{step_output_path.stem}_error.txt")
+
+
 def normalize_cell_value(value: object) -> str:
     """TSV出力用にセル値を文字列へ変換する。"""
     if value is None:
         return ""
 
     return str(value)
+
+
+def get_a_column_value(row: list[str]) -> str:
+    """A列の値を取得し、存在しない場合は空文字を返す。"""
+    if not row:
+        return ""
+
+    return row[0].strip()
+
+
+def is_blank_row(row: list[str]) -> bool:
+    """行内のすべてのセルが空または空白だけかどうかを判定する。"""
+    return all(cell.strip() == "" for cell in row)
 
 
 def write_sheet_to_tsv(rows: Iterable[tuple[object, ...]], output_path: Path) -> None:
@@ -37,7 +60,89 @@ def write_sheet_to_tsv(rows: Iterable[tuple[object, ...]], output_path: Path) ->
             writer.writerow([normalize_cell_value(cell) for cell in row])
 
 
-def export_by_sheets_to_tsv(excel_path: Path) -> int:
+def read_tsv(tsv_path: Path) -> list[list[str]]:
+    """TSVファイルを読み込む。"""
+    with tsv_path.open("r", encoding="utf-8-sig", newline="") as input_file:
+        return list(csv.reader(input_file, delimiter="\t"))
+
+
+def write_rows_to_tsv(rows: Iterable[list[str]], output_path: Path) -> None:
+    """行リストをTSVファイルへ出力する。"""
+    with output_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
+        writer.writerows(rows)
+
+
+def write_error_file(error_path: Path, message: str) -> None:
+    """エラー内容をテキストファイルへ出力する。"""
+    with error_path.open("w", encoding="utf-8", newline="") as error_file:
+        error_file.write(f"{message}\n")
+
+
+def find_code_row_index(rows: list[list[str]]) -> int | None:
+    """A列が「コード」と完全一致する行番号を返す。"""
+    for index, row in enumerate(rows):
+        if get_a_column_value(row) == CODE_HEADER_VALUE:
+            return index
+
+    return None
+
+
+def find_code_header_rows(tsv_path: Path) -> tuple[list[str], list[str], int]:
+    """店舗コード行と見出し行を取得する。"""
+    rows = read_tsv(tsv_path)
+    code_row_index = find_code_row_index(rows)
+
+    if code_row_index is None:
+        raise ValueError("Error: A列が「コード」の行が見つかりません。")
+
+    if code_row_index == 0:
+        raise ValueError("Error: 「コード」行の1つ上の行が存在しません。")
+
+    store_code_row = rows[code_row_index - 1]
+    header_row = rows[code_row_index]
+    return store_code_row, header_row, code_row_index
+
+
+def extract_rows_after_code_until_blank(
+    rows: list[list[str]], code_row_index: int
+) -> list[list[str]]:
+    """「コード」行の次の行から完全空白行の1つ上の行までを取得する。"""
+    detail_rows: list[list[str]] = []
+
+    for row in rows[code_row_index + 1 :]:
+        if is_blank_row(row):
+            break
+
+        detail_rows.append(row)
+
+    return detail_rows
+
+
+def process_step0001_tsv(tsv_path: Path) -> Path | None:
+    """TSVから店舗コード行・見出し行・明細行を抽出しstep0001 TSVを出力する。"""
+    step_output_path = build_step0001_output_path(tsv_path)
+    error_output_path = build_error_output_path(step_output_path)
+
+    try:
+        rows = read_tsv(tsv_path)
+        store_code_row, header_row, code_row_index = find_code_header_rows(tsv_path)
+        detail_rows = extract_rows_after_code_until_blank(rows, code_row_index)
+        write_rows_to_tsv(
+            [store_code_row, header_row, *detail_rows],
+            step_output_path,
+        )
+    except ValueError as error:
+        message = str(error)
+        print(message)
+        write_error_file(error_output_path, message)
+        return None
+
+    print(f"Exported step0001 TSV to '{step_output_path}'")
+    return step_output_path
+
+
+def export_by_sheets_to_tsv(excel_path: Path) -> list[Path]:
     """シート名にBYを含むシートだけをTSVファイルとして出力する。"""
     from openpyxl import load_workbook
 
@@ -51,16 +156,19 @@ def export_by_sheets_to_tsv(excel_path: Path) -> int:
     if not by_sheet_names:
         print("No sheets containing 'BY' were found.")
         workbook.close()
-        return 0
+        return []
+
+    output_paths: list[Path] = []
 
     for index, sheet_name in enumerate(by_sheet_names, start=1):
         worksheet = workbook[sheet_name]
         output_path = build_output_path(excel_path, index)
         write_sheet_to_tsv(worksheet.iter_rows(values_only=True), output_path)
+        output_paths.append(output_path)
         print(f"Exported sheet '{sheet_name}' to '{output_path}'")
 
     workbook.close()
-    return len(by_sheet_names)
+    return output_paths
 
 
 def main() -> int:
@@ -85,7 +193,10 @@ def main() -> int:
         print(f"Error: expected an .xlsx file: {excel_path}")
         return 1
 
-    export_by_sheets_to_tsv(excel_path)
+    tsv_paths = export_by_sheets_to_tsv(excel_path)
+    for tsv_path in tsv_paths:
+        process_step0001_tsv(tsv_path)
+
     return 0
 
 
