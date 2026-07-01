@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -47,6 +48,12 @@ def normalize_cell_value(value: object) -> str:
     """TSV出力用にセル値を文字列へ変換する。"""
     if value is None:
         return ""
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y/%m/%d")
+
+    if isinstance(value, date):
+        return value.strftime("%Y/%m/%d")
 
     return str(value)
 
