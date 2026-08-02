@@ -6,13 +6,13 @@
 
 ### ファイル名
 
-作成対象のPythonファイル名は、次の名前とします。
+作成対象のPythonファイルは、`src`フォルダーへ次のパスで配置します。
 
 ```text
-json_readable_Cmd.py
+src/json_readable_Cmd.py
 ```
 
-`json_readable.py` は使用しません。
+リポジトリ直下の`json_readable_Cmd.py`および`json_readable.py`は使用しません。
 
 ### 目的
 
@@ -23,13 +23,13 @@ UTF-8で保存された任意のJSONファイルを読み込み、Unicodeエス�
 ### 実行方法
 
 ```cmd
-py json_readable_Cmd.py 入力ファイル.json
+py src/json_readable_Cmd.py 入力ファイル.json
 ```
 
 空白を含むパスはダブルクォーテーションで囲みます。
 
 ```cmd
-py json_readable_Cmd.py "C:\JSON Files\sample data.json"
+py src/json_readable_Cmd.py "C:\JSON Files\sample data.json"
 ```
 
 ### 入力仕様
