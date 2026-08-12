@@ -13,6 +13,7 @@ TARGET_SHEET_KEYWORD = "BY"
 CODE_HEADER_VALUE = "コード"
 INCORRECT_VENDOR_NAME = "ショクリュ-"
 CORRECT_VENDOR_NAME = "ショクリュー"
+TARGET_VENDOR_NAMES = {"中村角", "旭物産"}
 USAGE = "Usage: python src/izumi-asahi-order_0001_Cmd.py <excel_file_path>"
 
 
@@ -42,6 +43,21 @@ def build_step0002_output_path(step0001_path: Path) -> Path:
         output_stem = f"{step0001_path.stem}_step0002"
 
     return step0001_path.with_name(f"{output_stem}.tsv")
+
+
+def build_step0003_output_path(step0002_path: Path) -> Path:
+    """step0003 TSVの出力パスを作成する。"""
+    if step0002_path.stem.endswith("_step0002"):
+        output_stem = f"{step0002_path.stem.removesuffix('_step0002')}_step0003"
+    else:
+        output_stem = f"{step0002_path.stem}_step0003"
+
+    return step0002_path.with_name(f"{output_stem}.tsv")
+
+
+def build_warning_output_path(step_output_path: Path) -> Path:
+    """処理のwarning出力パスを作成する。"""
+    return step_output_path.with_name(f"{step_output_path.stem}_warning.txt")
 
 
 def normalize_cell_value(value: object) -> str:
@@ -98,6 +114,12 @@ def write_error_file(error_path: Path, message: str) -> None:
         error_file.write(f"{message}\n")
 
 
+def write_warning_file(warning_path: Path, message: str) -> None:
+    """warning内容をテキストファイルへ出力する。"""
+    with warning_path.open("w", encoding="utf-8", newline="") as warning_file:
+        warning_file.write(f"{message}\n")
+
+
 def find_code_row_index(rows: list[list[str]]) -> int | None:
     """A列が「コード」と完全一致する行番号を返す。"""
     for index, row in enumerate(rows):
@@ -146,6 +168,55 @@ def normalize_vendor_name_in_a_column(row: list[str]) -> list[str]:
         return normalized_row
 
     return row
+
+
+def extract_target_vendor_blocks(rows: list[list[str]]) -> tuple[list[list[str]], bool]:
+    """先頭2行と対象業者のデータブロックだけを取得する。"""
+    output_rows = rows[:2]
+    is_target_block = False
+    target_vendor_found = False
+
+    for row in rows[2:]:
+        vendor_name = get_a_column_value(row)
+        if vendor_name:
+            is_target_block = vendor_name in TARGET_VENDOR_NAMES
+            if is_target_block:
+                target_vendor_found = True
+
+        if is_target_block:
+            output_rows.append(row)
+
+    return output_rows, target_vendor_found
+
+
+def process_step0003_tsv(step0002_path: Path) -> Path | None:
+    """step0002 TSVから対象業者のブロックを抽出しstep0003 TSVを出力する。"""
+    step0003_output_path = build_step0003_output_path(step0002_path)
+    error_output_path = build_error_output_path(step0003_output_path)
+    warning_output_path = build_warning_output_path(step0003_output_path)
+
+    if not step0002_path.exists():
+        message = f"Error: file not found: {step0002_path}"
+        print(message)
+        write_error_file(error_output_path, message)
+        return None
+
+    try:
+        rows = read_tsv(step0002_path)
+        output_rows, target_vendor_found = extract_target_vendor_blocks(rows)
+        write_rows_to_tsv(output_rows, step0003_output_path)
+        if not target_vendor_found:
+            message = "Warning: no vendor blocks for 「中村角」 or 「旭物産」 were found."
+            print(message)
+            write_warning_file(warning_output_path, message)
+    except OSError as error:
+        message = f"Error: failed to process TSV file: {step0002_path}: {error}"
+        print(message)
+        write_error_file(error_output_path, message)
+        return None
+
+    print(f"Exported step0003 TSV to '{step0003_output_path}'")
+    return step0003_output_path
 
 
 def process_step0002_tsv(step0001_path: Path) -> Path | None:
@@ -251,7 +322,9 @@ def main() -> int:
     for tsv_path in tsv_paths:
         step0001_path = process_step0001_tsv(tsv_path)
         if step0001_path is not None:
-            process_step0002_tsv(step0001_path)
+            step0002_path = process_step0002_tsv(step0001_path)
+            if step0002_path is not None:
+                process_step0003_tsv(step0002_path)
 
     return 0
 
