@@ -10,6 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
+from openpyxl import Workbook
+from openpyxl.utils.exceptions import IllegalCharacterError
+
 
 USAGE = "使用方法：py src/json_to_tsv_csv_Cmd.py 入力ファイル.json"
 OUTPUT_COLUMNS = [
@@ -66,11 +69,12 @@ def validate_input_file(input_path: Path) -> None:
         raise JsonConversionError("エラー：JSONファイルを指定してください。")
 
 
-def create_output_paths(input_path: Path) -> tuple[Path, Path, Path]:
-    """TSV、CSVおよび警告ファイルのパスを作成する。"""
+def create_output_paths(input_path: Path) -> tuple[Path, Path, Path, Path]:
+    """TSV、CSV、XLSXおよび警告ファイルのパスを作成する。"""
     return (
         input_path.with_suffix(".tsv"),
         input_path.with_suffix(".csv"),
+        input_path.with_suffix(".xlsx"),
         input_path.with_name(f"{input_path.stem}_warning.txt"),
     )
 
@@ -149,11 +153,18 @@ def write_warning_file(
     existing_paths: list[Path],
     tsv_path: Path,
     csv_path: Path,
+    xlsx_path: Path,
 ) -> None:
     """既存出力についての警告ファイルを、未作成の場合だけ作成する。"""
     lines = ["警告：出力ファイルがすでに存在するため、変換を中止しました。"]
     lines.extend(f"既存ファイル：{path}" for path in existing_paths)
-    lines.extend((f"TSV出力：{tsv_path}", f"CSV出力：{csv_path}"))
+    lines.extend(
+        (
+            f"TSV出力：{tsv_path}",
+            f"CSV出力：{csv_path}",
+            f"XLSX出力：{xlsx_path}",
+        )
+    )
 
     try:
         with warning_path.open("x", encoding="utf-8", newline="\n") as warning_file:
@@ -166,14 +177,18 @@ def write_warning_file(
 
 
 def validate_output_paths(
-    tsv_path: Path, csv_path: Path, warning_path: Path
+    tsv_path: Path, csv_path: Path, xlsx_path: Path, warning_path: Path
 ) -> None:
-    """既存のTSV・CSVを検出し、警告を記録して変換を中止する。"""
-    existing_paths = [path for path in (tsv_path, csv_path) if path.exists()]
+    """既存の出力を検出し、警告を記録して変換を中止する。"""
+    existing_paths = [
+        path for path in (tsv_path, csv_path, xlsx_path) if path.exists()
+    ]
     if not existing_paths:
         return
 
-    write_warning_file(warning_path, existing_paths, tsv_path, csv_path)
+    write_warning_file(
+        warning_path, existing_paths, tsv_path, csv_path, xlsx_path
+    )
     details = "\n".join(f"既存ファイル：{path}" for path in existing_paths)
     raise JsonConversionError(
         "警告：出力ファイルがすでに存在するため、変換を中止しました。\n"
@@ -212,6 +227,59 @@ def write_temporary_file(
         ) from error
 
 
+def write_temporary_xlsx(
+    output_path: Path, items: list[dict[str, Any]]
+) -> Path:
+    """商品データをXLSXの一時ファイルへ書き込む。"""
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.", suffix=".xlsx", dir=output_path.parent
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "items"
+        worksheet.append(OUTPUT_COLUMNS)
+
+        for item in items:
+            row_number = worksheet.max_row + 1
+            for column_number, column_name in enumerate(OUTPUT_COLUMNS, start=1):
+                value = item[column_name] if column_name in item else None
+                cell = worksheet.cell(row=row_number, column=column_number)
+
+                if column_name == "productCode":
+                    cell.value = "" if value is None else str(value)
+                    cell.number_format = "@"
+                elif value is None:
+                    cell.value = None
+                elif isinstance(value, bool):
+                    cell.value = "true" if value else "false"
+                elif isinstance(value, (dict, list)):
+                    cell.value = json.dumps(
+                        value, ensure_ascii=False, separators=(",", ":")
+                    )
+                else:
+                    cell.value = value
+
+        workbook.save(temporary_path)
+        workbook.close()
+        return temporary_path
+    except (OSError, ValueError, TypeError, IllegalCharacterError) as error:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+        raise JsonConversionError(
+            "エラー：XLSXファイルを作成できません。\n"
+            f"出力先：{output_path}\n"
+            f"詳細：{error}"
+        ) from error
+
+
 def finalize_output_files(file_pairs: list[tuple[Path, Path]]) -> None:
     """一時ファイルを、上書きせず正式な出力ファイルとして確定する。"""
     finalized_paths: list[Path] = []
@@ -241,9 +309,13 @@ def finalize_output_files(file_pairs: list[tuple[Path, Path]]) -> None:
 
 
 def write_output_files(
-    rows: list[list[str]], tsv_path: Path, csv_path: Path
+    rows: list[list[str]],
+    items: list[dict[str, Any]],
+    tsv_path: Path,
+    csv_path: Path,
+    xlsx_path: Path,
 ) -> None:
-    """TSVとCSVを書き込み、両方が成功した場合だけ正式名へ確定する。"""
+    """3形式を書き込み、すべて成功した場合だけ正式名へ確定する。"""
     temporary_pairs: list[tuple[Path, Path]] = []
     try:
         temporary_pairs.append(
@@ -251,6 +323,9 @@ def write_output_files(
         )
         temporary_pairs.append(
             (write_temporary_file(csv_path, rows, ","), csv_path)
+        )
+        temporary_pairs.append(
+            (write_temporary_xlsx(xlsx_path, items), xlsx_path)
         )
     except JsonConversionError:
         for temporary_path, _ in temporary_pairs:
@@ -268,19 +343,20 @@ def main() -> None:
     try:
         input_path = get_input_path(sys.argv[1:])
         validate_input_file(input_path)
-        tsv_path, csv_path, warning_path = create_output_paths(input_path)
+        tsv_path, csv_path, xlsx_path, warning_path = create_output_paths(input_path)
 
         data = load_json_file(input_path)
         items = get_items(data)
         rows = create_output_rows(items)
-        validate_output_paths(tsv_path, csv_path, warning_path)
-        write_output_files(rows, tsv_path, csv_path)
+        validate_output_paths(tsv_path, csv_path, xlsx_path, warning_path)
+        write_output_files(rows, items, tsv_path, csv_path, xlsx_path)
 
         print("変換が完了しました。")
         print(f"入力ファイル : {input_path}")
         print(f"商品件数     : {len(items)}")
         print(f"TSV出力      : {tsv_path}")
         print(f"CSV出力      : {csv_path}")
+        print(f"XLSX出力     : {xlsx_path}")
     except JsonConversionError as error:
         print(error)
         sys.exit(1)
