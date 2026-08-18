@@ -17,6 +17,7 @@ import win32gui
 
 
 WINDOW_TITLE: str = "Highlight Red Color Changed Order Quantity DnD"
+EXCEL_PATH_ENVIRONMENT_VARIABLE: str = "HIGHLIGHT_ORDER_EXCEL_PATH"
 
 
 ###############################################################
@@ -176,8 +177,15 @@ def open_excel_file_and_wait(
             + pszInputFileFullPath,
         )
 
+    dictEnvironment: dict[str, str] = os.environ.copy()
+    dictEnvironment[EXCEL_PATH_ENVIRONMENT_VARIABLE] = os.path.abspath(
+        pszInputFileFullPath
+    )
     pszPowerShellCommand: str = (
-        "$process = Start-Process -FilePath $args[0] -PassThru; "
+        "$excelPath = $env:"
+        + EXCEL_PATH_ENVIRONMENT_VARIABLE
+        + "; "
+        + "$process = Start-Process -FilePath $excelPath -PassThru; "
         + "$process.WaitForExit(); exit $process.ExitCode"
     )
     try:
@@ -187,11 +195,11 @@ def open_excel_file_and_wait(
                 "-NoProfile",
                 "-Command",
                 pszPowerShellCommand,
-                pszInputFileFullPath,
             ],
             check=False,
             capture_output=True,
             text=True,
+            env=dictEnvironment,
         )
     except Exception as objException:
         return (
@@ -251,7 +259,15 @@ def open_excel_file_without_wait(
             + pszInputFileFullPath,
         )
 
-    pszPowerShellCommand: str = "Start-Process -FilePath $args[0]"
+    dictEnvironment: dict[str, str] = os.environ.copy()
+    dictEnvironment[EXCEL_PATH_ENVIRONMENT_VARIABLE] = os.path.abspath(
+        pszInputFileFullPath
+    )
+    pszPowerShellCommand: str = (
+        "$excelPath = $env:"
+        + EXCEL_PATH_ENVIRONMENT_VARIABLE
+        + "; Start-Process -FilePath $excelPath"
+    )
     try:
         objCompletedProcess: subprocess.CompletedProcess[str] = subprocess.run(
             [
@@ -259,11 +275,11 @@ def open_excel_file_without_wait(
                 "-NoProfile",
                 "-Command",
                 pszPowerShellCommand,
-                pszInputFileFullPath,
             ],
             check=False,
             capture_output=True,
             text=True,
+            env=dictEnvironment,
         )
     except Exception as objException:
         return (
