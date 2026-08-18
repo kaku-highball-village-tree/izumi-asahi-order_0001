@@ -136,6 +136,84 @@ def run_highlight_red_color_changed_order_quantity_cmd(
 
 ###############################################################
 #
+# open_excel_file_and_wait
+#
+###############################################################
+def open_excel_file_and_wait(
+    pszInputFileFullPath: str,
+) -> tuple[bool, str]:
+    """関連付けられたExcelアプリで入力ファイルを開き、終了まで待機します。
+
+    担当者がExcelを編集、保存、終了した後に数量比較を始められるよう、
+    PowerShellのStart-Processを使用してExcelのプロセス終了を待ちます。
+
+    Args:
+        pszInputFileFullPath: ドロップされたExcelファイルの絶対パスです。
+
+    Returns:
+        Excelを正常に開いて終了を待てた場合はTrueと空文字を返します。
+        起動または待機に失敗した場合はFalseとエラー内容を返します。
+    """
+    if not os.path.exists(pszInputFileFullPath):
+        return (
+            False,
+            "Error: input Excel file not found. Path = " + pszInputFileFullPath,
+        )
+    if not os.path.isfile(pszInputFileFullPath):
+        return (
+            False,
+            "Error: input path is not a file. Path = " + pszInputFileFullPath,
+        )
+    if os.path.splitext(pszInputFileFullPath)[1].lower() != ".xlsx":
+        return (
+            False,
+            "Error: input file extension is not .xlsx. Path = "
+            + pszInputFileFullPath,
+        )
+
+    pszPowerShellCommand: str = (
+        "$process = Start-Process -FilePath $args[0] -PassThru; "
+        + "$process.WaitForExit(); exit $process.ExitCode"
+    )
+    try:
+        objCompletedProcess: subprocess.CompletedProcess[str] = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                pszPowerShellCommand,
+                pszInputFileFullPath,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as objException:
+        return (
+            False,
+            "Error: Excelファイルを開けませんでした。Detail = "
+            + str(objException),
+        )
+
+    if objCompletedProcess.returncode != 0:
+        pszStdErr: str = objCompletedProcess.stderr.strip()
+        if pszStdErr == "":
+            pszStdErr = "Excel process exited with a non-zero return code."
+        return (
+            False,
+            "Error: Excelファイルの起動または終了待機に失敗しました。\n\n"
+            + "Return code = "
+            + str(objCompletedProcess.returncode)
+            + "\n\n"
+            + "stderr:\n"
+            + pszStdErr,
+        )
+
+    return True, ""
+
+
+###############################################################
+#
 # draw_instruction_text
 #
 ###############################################################
@@ -152,7 +230,8 @@ def draw_instruction_text(iWindowHandle: int) -> None:
     )
     pszInstructionText: str = (
         "発注Excelファイルを1つ、このウィンドウにドラッグ＆ドロップしてください。\n"
-        "前回履歴と数量を比較し、変更されたquantityセルを赤色にします。\n"
+        "Excelが開いたら数量を編集し、上書き保存してExcelを閉じてください。\n"
+        "Excelを閉じた後、変更されたquantityセルを赤色にします。\n"
         "エラーが発生した場合は <Excelファイル名>_error.txt を出力します。"
     )
     iDrawTextFormat: int = win32con.DT_LEFT | win32con.DT_TOP | win32con.DT_WORDBREAK
@@ -196,6 +275,13 @@ def window_proc(
                 return 0
 
             pszDroppedFilePath: str = win32api.DragQueryFile(iDropHandle, 0)
+            bIsExcelClosed, pszExcelMessage = open_excel_file_and_wait(
+                pszDroppedFilePath
+            )
+            if not bIsExcelClosed:
+                show_error_message_box(pszExcelMessage, WINDOW_TITLE)
+                return 0
+
             bIsSuccess, pszMessage = run_highlight_red_color_changed_order_quantity_cmd(
                 pszDroppedFilePath
             )
