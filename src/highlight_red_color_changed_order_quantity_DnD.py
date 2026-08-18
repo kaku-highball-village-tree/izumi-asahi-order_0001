@@ -66,11 +66,13 @@ def show_error_message_box(
 ###############################################################
 def run_highlight_red_color_changed_order_quantity_cmd(
     pszInputFileFullPath: str,
+    pszMode: str = "",
 ) -> tuple[bool, str]:
     """同じフォルダーのCmdプログラムをsubprocess.run()で実行します。
 
     Args:
         pszInputFileFullPath: ドロップされたExcelファイルのパスです。
+        pszMode: 編集前準備の場合は--prepare、比較処理の場合は空文字です。
 
     Returns:
         成功したかどうかと、標準出力またはエラー内容を返します。
@@ -92,13 +94,16 @@ def run_highlight_red_color_changed_order_quantity_cmd(
         return False, pszErrorMessage
 
     pszPythonExecutableFullPath: str = sys.executable
+    listCommandArguments: list[str] = [
+        pszPythonExecutableFullPath,
+        pszScriptFileFullPath,
+    ]
+    if pszMode != "":
+        listCommandArguments.append(pszMode)
+    listCommandArguments.append(pszInputFileFullPath)
     try:
         objCompletedProcess: subprocess.CompletedProcess[str] = subprocess.run(
-            [
-                pszPythonExecutableFullPath,
-                pszScriptFileFullPath,
-                pszInputFileFullPath,
-            ],
+            listCommandArguments,
             check=False,
             capture_output=True,
             text=True,
@@ -214,6 +219,78 @@ def open_excel_file_and_wait(
 
 ###############################################################
 #
+# open_excel_file_without_wait
+#
+###############################################################
+def open_excel_file_without_wait(
+    pszInputFileFullPath: str,
+) -> tuple[bool, str]:
+    """処理済みExcelを通常の編集可能な状態で開き、終了を待たずに戻ります。
+
+    Args:
+        pszInputFileFullPath: 赤色設定と履歴保存が完了したExcelのパスです。
+
+    Returns:
+        起動要求に成功した場合はTrueと空文字を返します。起動に失敗した
+        場合はFalseと、担当者へ表示するエラー内容を返します。
+    """
+    if not os.path.exists(pszInputFileFullPath):
+        return (
+            False,
+            "Error: input Excel file not found. Path = " + pszInputFileFullPath,
+        )
+    if not os.path.isfile(pszInputFileFullPath):
+        return (
+            False,
+            "Error: input path is not a file. Path = " + pszInputFileFullPath,
+        )
+    if os.path.splitext(pszInputFileFullPath)[1].lower() != ".xlsx":
+        return (
+            False,
+            "Error: input file extension is not .xlsx. Path = "
+            + pszInputFileFullPath,
+        )
+
+    pszPowerShellCommand: str = "Start-Process -FilePath $args[0]"
+    try:
+        objCompletedProcess: subprocess.CompletedProcess[str] = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                pszPowerShellCommand,
+                pszInputFileFullPath,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as objException:
+        return (
+            False,
+            "Error: 処理済みExcelを再表示できませんでした。Detail = "
+            + str(objException),
+        )
+
+    if objCompletedProcess.returncode != 0:
+        pszStdErr: str = objCompletedProcess.stderr.strip()
+        if pszStdErr == "":
+            pszStdErr = "PowerShell exited with a non-zero return code."
+        return (
+            False,
+            "Error: 処理済みExcelを再表示できませんでした。\n\n"
+            + "Return code = "
+            + str(objCompletedProcess.returncode)
+            + "\n\n"
+            + "stderr:\n"
+            + pszStdErr,
+        )
+
+    return True, ""
+
+
+###############################################################
+#
 # draw_instruction_text
 #
 ###############################################################
@@ -232,6 +309,7 @@ def draw_instruction_text(iWindowHandle: int) -> None:
         "発注Excelファイルを1つ、このウィンドウにドラッグ＆ドロップしてください。\n"
         "Excelが開いたら数量を編集し、上書き保存してExcelを閉じてください。\n"
         "Excelを閉じた後、変更されたquantityセルを赤色にします。\n"
+        "処理後、通常どおり編集できるExcelを自動的に再表示します。\n"
         "エラーが発生した場合は <Excelファイル名>_error.txt を出力します。"
     )
     iDrawTextFormat: int = win32con.DT_LEFT | win32con.DT_TOP | win32con.DT_WORDBREAK
@@ -275,6 +353,16 @@ def window_proc(
                 return 0
 
             pszDroppedFilePath: str = win32api.DragQueryFile(iDropHandle, 0)
+            bIsPrepareSuccess, pszPrepareMessage = (
+                run_highlight_red_color_changed_order_quantity_cmd(
+                    pszDroppedFilePath,
+                    "--prepare",
+                )
+            )
+            if not bIsPrepareSuccess:
+                show_error_message_box(pszPrepareMessage, WINDOW_TITLE)
+                return 0
+
             bIsExcelClosed, pszExcelMessage = open_excel_file_and_wait(
                 pszDroppedFilePath
             )
@@ -285,10 +373,32 @@ def window_proc(
             bIsSuccess, pszMessage = run_highlight_red_color_changed_order_quantity_cmd(
                 pszDroppedFilePath
             )
-            if bIsSuccess:
-                show_message_box(pszMessage, WINDOW_TITLE)
-            else:
+            if not bIsSuccess:
                 show_error_message_box(pszMessage, WINDOW_TITLE)
+                return 0
+
+            bIsReopenSuccess, pszReopenMessage = open_excel_file_without_wait(
+                pszDroppedFilePath
+            )
+            if not bIsReopenSuccess:
+                show_error_message_box(
+                    "赤色設定と履歴保存は完了しましたが、結果確認用のExcelを開けませんでした。\n\n"
+                    + "Excelファイルを手動で開いて確認してください。\n\n"
+                    + "対象ファイル: "
+                    + pszDroppedFilePath
+                    + "\n\n"
+                    + pszReopenMessage,
+                    WINDOW_TITLE,
+                )
+                return 0
+
+            show_message_box(
+                pszMessage
+                + "\n結果確認用としてExcelを再度開きました。"
+                + "\nExcelは通常どおり編集できます。"
+                + "\nさらに編集した場合は、保存して閉じた後、改めてDnDしてください。",
+                WINDOW_TITLE,
+            )
         finally:
             win32api.DragFinish(iDropHandle)
         return 0

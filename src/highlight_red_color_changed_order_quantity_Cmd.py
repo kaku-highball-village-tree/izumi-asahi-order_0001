@@ -629,7 +629,7 @@ def remove_previous_latest_tsv(objPreviousLatestPath: Path) -> None:
 #
 ###############################################################
 def process_excel_file(pszInputFileFullPath: str) -> None:
-    """Excelの初回履歴作成、または前回比較・赤色設定・履歴更新を行います。"""
+    """編集後Excelを前回履歴と比較し、赤色設定と履歴更新を行います。"""
     pszValidatedPath: str = validate_excel_path(pszInputFileFullPath)
     objWorkbook: Workbook = load_excel(pszValidatedPath)
     objWorksheet: Worksheet = find_target_worksheet(objWorkbook)
@@ -642,16 +642,9 @@ def process_excel_file(pszInputFileFullPath: str) -> None:
     pszTsvText: str = serialize_tsv(listCurrentRows)
 
     if bIsFirstRun:
-        objHistoryPath, objLatestPath = save_snapshot_files(
-            pszValidatedPath,
-            iNextHistoryNumber,
-            pszTsvText,
+        raise ValueError(
+            "比較用履歴がありません。Excelを編集する前に--prepareを実行してください。"
         )
-        remove_old_error_file(pszValidatedPath)
-        print("初回履歴を作成しました。")
-        print("History: " + str(objHistoryPath))
-        print("Latest: " + str(objLatestPath))
-        return
 
     if objPreviousLatestPath is None:
         raise ValueError("比較用latest TSVを特定できません。")
@@ -676,19 +669,70 @@ def process_excel_file(pszInputFileFullPath: str) -> None:
 
 ###############################################################
 #
+# prepare_history_before_edit
+#
+###############################################################
+def prepare_history_before_edit(pszInputFileFullPath: str) -> None:
+    """Excelを開く前に履歴を検証し、初回だけ編集前履歴を作成します。
+
+    Args:
+        pszInputFileFullPath: これから担当者が編集するExcelのパスです。
+
+    Returns:
+        戻り値はありません。履歴がない場合は0001の履歴とlatestを作り、
+        既に履歴がある場合は整合性検証だけを行います。
+
+    Raises:
+        ValueError: Excelまたは履歴の状態が仕様に合わない場合です。
+        OSError: ExcelやTSVの読み書きに失敗した場合です。
+    """
+    pszValidatedPath: str = validate_excel_path(pszInputFileFullPath)
+    objWorkbook: Workbook = load_excel(pszValidatedPath)
+    objWorksheet: Worksheet = find_target_worksheet(objWorkbook)
+    listCurrentRows: list[OrderRow] = read_excel_rows(objWorksheet)
+    dictHistoryFiles, dictLatestFiles = find_history_files(pszValidatedPath)
+    bIsFirstRun, _, iNextHistoryNumber = validate_history_state(
+        dictHistoryFiles,
+        dictLatestFiles,
+    )
+
+    if bIsFirstRun:
+        pszTsvText: str = serialize_tsv(listCurrentRows)
+        objHistoryPath, objLatestPath = save_snapshot_files(
+            pszValidatedPath,
+            iNextHistoryNumber,
+            pszTsvText,
+        )
+        remove_old_error_file(pszValidatedPath)
+        print("編集前の初回履歴を作成しました。")
+        print("History: " + str(objHistoryPath))
+        print("Latest: " + str(objLatestPath))
+        return
+
+    remove_old_error_file(pszValidatedPath)
+    print("編集前の履歴確認が完了しました。")
+
+
+###############################################################
+#
 # main
 #
 ###############################################################
 def main() -> int:
     """引数を確認して処理を実行し、成功0・失敗1の終了コードを返します。"""
     iArgumentCount: int = len(sys.argv)
-    if iArgumentCount != 2:
+    bIsPrepareMode: bool = iArgumentCount == 3 and sys.argv[1] == "--prepare"
+    bIsCompareMode: bool = iArgumentCount == 2
+    if not bIsPrepareMode and not bIsCompareMode:
         pszScriptFileName: str = os.path.basename(__file__)
         pszErrorMessage: str = (
-            "Error: Excelファイルパスを1つ指定してください。\n"
+            "Error: 実行モードとExcelファイルパスを正しく指定してください。\n"
             + "Usage: python "
             + pszScriptFileName
             + " <excel_file_path>\n"
+            + "Prepare: python "
+            + pszScriptFileName
+            + " --prepare <excel_file_path>\n"
         )
         print(pszErrorMessage, file=sys.stderr, end="")
         pszErrorFileFullPath: str = os.path.splitext(pszScriptFileName)[0] + "_error_argument.txt"
@@ -698,9 +742,12 @@ def main() -> int:
             print("Error: 引数エラーファイルを保存できません。Detail = " + str(objException), file=sys.stderr)
         return 1
 
-    pszInputFileFullPath: str = sys.argv[1]
+    pszInputFileFullPath: str = sys.argv[2] if bIsPrepareMode else sys.argv[1]
     try:
-        process_excel_file(pszInputFileFullPath)
+        if bIsPrepareMode:
+            prepare_history_before_edit(pszInputFileFullPath)
+        else:
+            process_excel_file(pszInputFileFullPath)
     except Exception as objException:
         report_processing_error(
             pszInputFileFullPath,
