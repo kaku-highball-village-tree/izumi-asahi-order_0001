@@ -35,6 +35,7 @@ STEP0002_HEADERS: tuple[str, ...] = (
     "売価",
     "単位",
 )
+WEEKDAYS: tuple[str, ...] = ("月", "火", "水", "木", "金", "土", "日")
 SUPPORTED_EXTENSIONS: set[str] = {".xlsx", ".tsv", ".csv"}
 
 
@@ -49,6 +50,10 @@ class ProductRow:
 
 class Step0002Error(Exception):
     """処理0002で発生したエラーであることを呼び出し元へ伝えます。"""
+
+
+class Step0003Error(Exception):
+    """処理0003で発生したエラーであることを呼び出し元へ伝えます。"""
 
 
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
@@ -262,6 +267,13 @@ def get_step0002_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Pat
     return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
 
 
+def get_step0003_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Path]:
+    """_step0003.xlsxと_step0003.tsvの出力パスを返します。"""
+    objInputPath: Path = Path(pszInputFileFullPath)
+    objBasePath: Path = objInputPath.with_name(objInputPath.stem + "_step0003")
+    return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
+
+
 def create_temporary_path(objOutputPath: Path, pszSuffix: str) -> Path:
     """出力先と同じフォルダーに一意な一時ファイルパスを作ります。"""
     iFileDescriptor, pszTemporaryPath = tempfile.mkstemp(
@@ -376,6 +388,136 @@ def validate_step0001_outputs_match(
                 )
 
 
+def normalize_template_row(listValues: list[object]) -> list[str]:
+    """処理0002の14列を、空セルを空文字にした比較・出力用文字列へ変換します。"""
+    return [normalize_text(objValue) for objValue in listValues[: len(STEP0002_HEADERS)]]
+
+
+def read_step0002_excel_rows(objExcelPath: Path) -> list[list[str]]:
+    """処理0002のExcelを検証し、14列のデータ行を読み取ります。"""
+    objWorkbook: Workbook = load_workbook(objExcelPath, data_only=True)
+    listTargetWorksheets: list[Worksheet] = []
+    for objWorksheet in objWorkbook.worksheets:
+        tupleHeaders: tuple[str, ...] = tuple(
+            normalize_header(objWorksheet.cell(row=1, column=iColumn).value)
+            for iColumn in range(1, objWorksheet.max_column + 1)
+        )
+        if tupleHeaders == STEP0002_HEADERS:
+            listTargetWorksheets.append(objWorksheet)
+    if len(listTargetWorksheets) == 0:
+        raise ValueError("step0002の14列ヘッダーを持つExcelシートが見つかりません。")
+    if len(listTargetWorksheets) > 1:
+        raise ValueError(
+            "step0002の対象シートが複数見つかりました。対象シート = "
+            + ", ".join(objWorksheet.title for objWorksheet in listTargetWorksheets)
+        )
+    objWorksheet: Worksheet = listTargetWorksheets[0]
+    listRows: list[list[str]] = []
+    for iRow in range(2, objWorksheet.max_row + 1):
+        listValues: list[object] = [
+            objWorksheet.cell(row=iRow, column=iColumn).value
+            for iColumn in range(1, len(STEP0002_HEADERS) + 1)
+        ]
+        listNormalizedRow: list[str] = normalize_template_row(listValues)
+        if all(pszValue.strip() == "" for pszValue in listNormalizedRow):
+            continue
+        listRows.append(listNormalizedRow)
+    return listRows
+
+
+def read_step0002_tsv_rows(objTsvPath: Path) -> list[list[str]]:
+    """処理0002のUTF-8 TSVを検証し、14列のデータ行を読み取ります。"""
+    with objTsvPath.open(mode="r", encoding="utf-8", newline="") as objFile:
+        listRows: list[list[str]] = list(
+            csv.reader(objFile, delimiter="\t", strict=True)
+        )
+    if not listRows:
+        raise ValueError("step0002のTSVファイルが空です。")
+    if tuple(normalize_header(pszValue) for pszValue in listRows[0]) != STEP0002_HEADERS:
+        raise ValueError("step0002のTSVヘッダーが仕様どおりの14列ではありません。")
+    listNormalizedRows: list[list[str]] = []
+    for iRow, listValues in enumerate(listRows[1:], start=2):
+        if len(listValues) != len(STEP0002_HEADERS):
+            raise ValueError(
+                str(iRow)
+                + "行目の列数が14列ではありません。列数 = "
+                + str(len(listValues))
+            )
+        listNormalizedRow: list[str] = normalize_template_row(listValues)
+        if all(pszValue.strip() == "" for pszValue in listNormalizedRow):
+            continue
+        listNormalizedRows.append(listNormalizedRow)
+    return listNormalizedRows
+
+
+def validate_step0002_outputs_match(
+    listExcelRows: list[list[str]], listTsvRows: list[list[str]]
+) -> None:
+    """処理0002のXLSXとTSVの行数・行順・14列すべてが一致するか確認します。"""
+    if len(listExcelRows) != len(listTsvRows):
+        raise ValueError(
+            "step0002のXLSXとTSVの内容が一致しません。データ行数: XLSX = "
+            + str(len(listExcelRows))
+            + "、TSV = "
+            + str(len(listTsvRows))
+        )
+    for iRow, (listExcelRow, listTsvRow) in enumerate(
+        zip(listExcelRows, listTsvRows), start=2
+    ):
+        for iColumn, pszColumnName in enumerate(STEP0002_HEADERS):
+            if listExcelRow[iColumn] != listTsvRow[iColumn]:
+                raise ValueError(
+                    "step0002のXLSXとTSVの内容が一致しません。行 = "
+                    + str(iRow)
+                    + "、列 = "
+                    + pszColumnName
+                    + "、XLSX = "
+                    + repr(listExcelRow[iColumn])
+                    + "、TSV = "
+                    + repr(listTsvRow[iColumn])
+                )
+
+
+def build_step0003_rows(listStep0002Rows: list[list[str]]) -> list[list[str]]:
+    """処理0002の商品1行を月～日の7行へ展開します。"""
+    listStep0003Rows: list[list[str]] = []
+    for listStep0002Row in listStep0002Rows:
+        listMondayRow: list[str] = listStep0002Row.copy()
+        listMondayRow[1] = WEEKDAYS[0]
+        listStep0003Rows.append(listMondayRow)
+        for pszWeekday in WEEKDAYS[1:]:
+            listWeekdayRow: list[str] = [""] * len(STEP0002_HEADERS)
+            listWeekdayRow[1] = pszWeekday
+            listStep0003Rows.append(listWeekdayRow)
+    return listStep0003Rows
+
+
+def save_step0003_excel_template(
+    objOutputPath: Path, listStep0003Rows: list[list[str]]
+) -> None:
+    """月～日に展開した処理0003のExcelテンプレートを保存します。"""
+    objWorkbook: Workbook = Workbook()
+    objWorksheet: Worksheet = objWorkbook.active
+    objWorksheet.append(list(STEP0002_HEADERS))
+    for listValues in listStep0003Rows:
+        objWorksheet.append(listValues)
+        if listValues[1] == WEEKDAYS[0]:
+            iOutputRow: int = objWorksheet.max_row
+            objWorksheet.cell(row=iOutputRow, column=5).number_format = "@"
+            objWorksheet.cell(row=iOutputRow, column=6).number_format = "@"
+    objWorkbook.save(objOutputPath)
+
+
+def save_step0003_tsv_template(
+    objOutputPath: Path, listStep0003Rows: list[list[str]]
+) -> None:
+    """月～日に展開した処理0003のTSVをUTF-8 BOMなし、CRLFで保存します。"""
+    with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
+        objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
+        objWriter.writerow(STEP0002_HEADERS)
+        objWriter.writerows(listStep0003Rows)
+
+
 def replace_output_files(
     objTemporaryExcelPath: Path,
     objTemporaryTsvPath: Path,
@@ -447,8 +589,50 @@ def process_step0002_files(
         raise Step0002Error(str(objException)) from objException
 
 
+def process_step0003_files(
+    pszInputFileFullPath: str,
+    objStep0002ExcelPath: Path,
+    objStep0002TsvPath: Path,
+) -> tuple[Path, Path, int, int]:
+    """処理0002の両出力を比較し、月～日に展開した処理0003を作成します。"""
+    try:
+        listExcelRows: list[list[str]] = read_step0002_excel_rows(
+            objStep0002ExcelPath
+        )
+        listTsvRows: list[list[str]] = read_step0002_tsv_rows(objStep0002TsvPath)
+        validate_step0002_outputs_match(listExcelRows, listTsvRows)
+        listStep0003Rows: list[list[str]] = build_step0003_rows(listExcelRows)
+
+        objExcelOutputPath, objTsvOutputPath = get_step0003_output_file_paths(
+            pszInputFileFullPath
+        )
+        objTemporaryExcelPath: Path = create_temporary_path(objExcelOutputPath, ".xlsx")
+        objTemporaryTsvPath: Path = create_temporary_path(objTsvOutputPath, ".tsv")
+        try:
+            save_step0003_excel_template(objTemporaryExcelPath, listStep0003Rows)
+            save_step0003_tsv_template(objTemporaryTsvPath, listStep0003Rows)
+            replace_output_files(
+                objTemporaryExcelPath,
+                objTemporaryTsvPath,
+                objExcelOutputPath,
+                objTsvOutputPath,
+            )
+        finally:
+            for objTemporaryPath in (objTemporaryExcelPath, objTemporaryTsvPath):
+                if objTemporaryPath.exists():
+                    objTemporaryPath.unlink()
+        return (
+            objExcelOutputPath,
+            objTsvOutputPath,
+            len(listExcelRows),
+            len(listStep0003Rows),
+        )
+    except Exception as objException:
+        raise Step0003Error(str(objException)) from objException
+
+
 def process_input_file(pszInputFileFullPath: str) -> None:
-    """入力から処理0001と処理0002のXLSX・TSVを作成します。"""
+    """入力から処理0001～処理0003のXLSX・TSVを作成します。"""
     pszValidatedPath: str = validate_input_path(pszInputFileFullPath)
     pszExtension: str = os.path.splitext(pszValidatedPath)[1].lower()
     if pszExtension == ".xlsx":
@@ -472,12 +656,22 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             if objTemporaryPath.exists():
                 objTemporaryPath.unlink()
 
-    objStep0002ExcelPath, objStep0002TsvPath, iStep0002RowCount = (
+    objStep0002ExcelPath, objStep0002TsvPath, _ = (
         process_step0002_files(
             pszValidatedPath,
             objExcelOutputPath,
             objTsvOutputPath,
         )
+    )
+    (
+        objStep0003ExcelPath,
+        objStep0003TsvPath,
+        iProductCount,
+        iStep0003RowCount,
+    ) = process_step0003_files(
+        pszValidatedPath,
+        objStep0002ExcelPath,
+        objStep0002TsvPath,
     )
     remove_old_error_file(pszValidatedPath)
     print("朝日注文テンプレートファイルを作成しました。")
@@ -486,7 +680,10 @@ def process_input_file(pszInputFileFullPath: str) -> None:
     print("Step0001 TSV: " + str(objTsvOutputPath))
     print("Step0002 Excel: " + str(objStep0002ExcelPath))
     print("Step0002 TSV: " + str(objStep0002TsvPath))
-    print("Rows: " + str(iStep0002RowCount))
+    print("Step0003 Excel: " + str(objStep0003ExcelPath))
+    print("Step0003 TSV: " + str(objStep0003TsvPath))
+    print("Products: " + str(iProductCount))
+    print("Step0003 Rows: " + str(iStep0003RowCount))
 
 
 def main() -> int:
@@ -512,6 +709,13 @@ def main() -> int:
     pszInputFileFullPath: str = sys.argv[1]
     try:
         process_input_file(pszInputFileFullPath)
+    except Step0003Error as objException:
+        report_processing_error(
+            pszInputFileFullPath,
+            "朝日注文テンプレート処理0003",
+            str(objException),
+        )
+        return 1
     except Step0002Error as objException:
         report_processing_error(
             pszInputFileFullPath,
