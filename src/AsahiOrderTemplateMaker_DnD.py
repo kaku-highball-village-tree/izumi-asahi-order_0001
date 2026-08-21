@@ -3,7 +3,7 @@
 #
 # AsahiOrderTemplateMaker_DnD.py
 #
-# pip install pywin32
+# pip install openpyxl pywin32 tkcalendar
 #
 ###############################################################
 
@@ -14,6 +14,8 @@ import sys
 import win32api
 import win32con
 import win32gui
+
+from AsahiOrderTemplateMaker_Cmd import report_processing_error, select_start_monday
 
 
 WINDOW_TITLE: str = "Asahi Order Template Maker (Drag & Drop)"
@@ -33,6 +35,7 @@ def show_error_message_box(pszMessage: str, pszTitle: str) -> None:
 
 def run_asahi_order_template_maker_cmd(
     pszInputFileFullPath: str,
+    pszStartMonday: str,
 ) -> tuple[bool, str]:
     """同じフォルダーのCmdプログラムを実行します。"""
     pszCurrentDirectoryFullPath: str = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +53,13 @@ def run_asahi_order_template_maker_cmd(
         )
     try:
         objCompletedProcess: subprocess.CompletedProcess[str] = subprocess.run(
-            [sys.executable, pszScriptFileFullPath, pszInputFileFullPath],
+            [
+                sys.executable,
+                pszScriptFileFullPath,
+                "--start-monday",
+                pszStartMonday,
+                pszInputFileFullPath,
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -95,9 +104,10 @@ def draw_instruction_text(iWindowHandle: int) -> None:
     )
     pszInstructionText: str = (
         "Excel、TSV、またはCSVファイルをこのウィンドウにドラッグ＆ドロップしてください。\n"
-        "同じフォルダーにstep0001、step0002、step0003のXLSX・TSVを作成します。\n"
+        "開始月曜日をカレンダーから選択します。初期選択は来週の月曜日です。\n"
+        "同じフォルダーにstep0001～step0004のXLSX・TSVを作成します。\n"
         "既存の出力ファイルは自動的に上書きします。\n"
-        "エラー時は <元ファイル名>_error.txt を出力します。"
+        "キャンセルまたはエラー時は <元ファイル名>_error.txt を出力します。"
     )
     win32gui.DrawText(
         iDeviceContextHandle,
@@ -123,11 +133,48 @@ def window_proc(
             if iFileCount < 1:
                 show_error_message_box("Error: no files were dropped.", WINDOW_TITLE)
                 return 0
+            listDroppedFilePaths: list[str] = [
+                win32api.DragQueryFile(iDropHandle, iFileIndex)
+                for iFileIndex in range(iFileCount)
+            ]
+            try:
+                objStartMonday = select_start_monday()
+            except Exception as objException:
+                pszSelectionError: str = (
+                    "開始月曜日の選択中にエラーが発生しました。Detail = "
+                    + str(objException)
+                )
+                for pszDroppedFilePath in listDroppedFilePaths:
+                    report_processing_error(
+                        pszDroppedFilePath,
+                        "朝日注文テンプレート処理0004",
+                        pszSelectionError,
+                    )
+                show_error_message_box(pszSelectionError, WINDOW_TITLE)
+                return 0
+            if objStartMonday is None:
+                pszCancellationDetail: str = (
+                    "開始月曜日の選択がキャンセルされたため、処理0004を中止しました。"
+                )
+                for pszDroppedFilePath in listDroppedFilePaths:
+                    report_processing_error(
+                        pszDroppedFilePath,
+                        "朝日注文テンプレート処理0004",
+                        pszCancellationDetail,
+                    )
+                show_error_message_box(
+                    "開始月曜日の選択がキャンセルされました。\n"
+                    "処理0004を完了できないため、処理を中止します。",
+                    WINDOW_TITLE,
+                )
+                return 0
+            pszStartMonday: str = objStartMonday.isoformat()
             listFailedFileNames: list[str] = []
             iSuccessCount: int = 0
-            for iFileIndex in range(iFileCount):
-                pszDroppedFilePath: str = win32api.DragQueryFile(iDropHandle, iFileIndex)
-                bIsSuccess, _ = run_asahi_order_template_maker_cmd(pszDroppedFilePath)
+            for pszDroppedFilePath in listDroppedFilePaths:
+                bIsSuccess, _ = run_asahi_order_template_maker_cmd(
+                    pszDroppedFilePath, pszStartMonday
+                )
                 if bIsSuccess:
                     iSuccessCount += 1
                 else:

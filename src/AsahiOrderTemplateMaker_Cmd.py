@@ -3,7 +3,7 @@
 #
 # AsahiOrderTemplateMaker_Cmd.py
 #
-# pip install openpyxl
+# pip install openpyxl tkcalendar
 #
 ###############################################################
 
@@ -12,10 +12,14 @@ import os
 import shutil
 import sys
 import tempfile
+import tkinter as tk
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from tkinter import messagebox
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
+from tkcalendar import Calendar
 
 
 EXPECTED_HEADERS: tuple[str, str, str] = ("productCode", "productName", "spec")
@@ -54,6 +58,10 @@ class Step0002Error(Exception):
 
 class Step0003Error(Exception):
     """処理0003で発生したエラーであることを呼び出し元へ伝えます。"""
+
+
+class Step0004Error(Exception):
+    """処理0004で発生したエラーであることを呼び出し元へ伝えます。"""
 
 
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
@@ -130,6 +138,145 @@ def normalize_text(objValue: object) -> str:
     if objValue is None:
         return ""
     return str(objValue)
+
+
+def get_this_week_monday(objToday: date | None = None) -> date:
+    """基準日を含む週の月曜日を返します。"""
+    objBaseDate: date = date.today() if objToday is None else objToday
+    return objBaseDate - timedelta(days=objBaseDate.weekday())
+
+
+def validate_start_monday(objStartMonday: date) -> None:
+    """開始日が月曜日であることを確認します。"""
+    if objStartMonday.weekday() != 0:
+        raise ValueError(
+            "開始日は月曜日を指定してください。Date = "
+            + objStartMonday.isoformat()
+        )
+
+
+def parse_start_monday(pszValue: str) -> date:
+    """YYYY-MM-DDを開始月曜日として解析・検証します。"""
+    if len(pszValue) != 10:
+        raise ValueError("開始日の形式はYYYY-MM-DDではありません。Value = " + pszValue)
+    try:
+        objStartMonday: date = date.fromisoformat(pszValue)
+    except ValueError as objException:
+        raise ValueError(
+            "開始日の形式はYYYY-MM-DDではありません。Value = " + pszValue
+        ) from objException
+    if objStartMonday.isoformat() != pszValue:
+        raise ValueError("開始日の形式はYYYY-MM-DDではありません。Value = " + pszValue)
+    validate_start_monday(objStartMonday)
+    return objStartMonday
+
+
+def select_start_monday() -> date | None:
+    """カレンダーを表示し、利用者が選んだ月曜日またはキャンセル時Noneを返します。"""
+    objThisWeekMonday: date = get_this_week_monday()
+    objNextWeekMonday: date = objThisWeekMonday + timedelta(days=7)
+    objSelectedMonday: date | None = objNextWeekMonday
+    objLastValidMonday: date = objNextWeekMonday
+
+    objRoot = tk.Tk()
+    objRoot.title("Asahi Order Template Maker - 開始月曜日の選択")
+    objRoot.resizable(False, False)
+
+    objInstructionLabel = tk.Label(
+        objRoot,
+        text="処理0004の開始月曜日を選択してください。",
+        padx=10,
+        pady=8,
+    )
+    objInstructionLabel.pack()
+
+    objCalendar = Calendar(
+        objRoot,
+        selectmode="day",
+        year=objNextWeekMonday.year,
+        month=objNextWeekMonday.month,
+        day=objNextWeekMonday.day,
+        date_pattern="yyyy-mm-dd",
+        firstweekday="monday",
+    )
+    objCalendar.pack(padx=10, pady=5)
+
+    def set_selected_monday(objMonday: date) -> None:
+        nonlocal objSelectedMonday, objLastValidMonday
+        objSelectedMonday = objMonday
+        objLastValidMonday = objMonday
+        objCalendar.selection_set(objMonday)
+
+    def on_calendar_selected(_objEvent: object = None) -> None:
+        nonlocal objSelectedMonday
+        objSelectedDate: date = objCalendar.selection_get()
+        if objSelectedDate.weekday() != 0:
+            objCalendar.selection_set(objLastValidMonday)
+            messagebox.showerror(
+                "Asahi Order Template Maker",
+                "月曜日を選択してください。",
+                parent=objRoot,
+            )
+            return
+        objSelectedMonday = objSelectedDate
+
+    def confirm_selection() -> None:
+        nonlocal objSelectedMonday
+        objSelectedDate: date = objCalendar.selection_get()
+        if objSelectedDate.weekday() != 0:
+            messagebox.showerror(
+                "Asahi Order Template Maker",
+                "月曜日を選択してください。",
+                parent=objRoot,
+            )
+            return
+        objSelectedMonday = objSelectedDate
+        objRoot.destroy()
+
+    def cancel_selection() -> None:
+        nonlocal objSelectedMonday
+        objSelectedMonday = None
+        objRoot.destroy()
+
+    objCalendar.bind("<<CalendarSelected>>", on_calendar_selected)
+    objButtonFrame = tk.Frame(objRoot, padx=10, pady=10)
+    objButtonFrame.pack(fill=tk.X)
+    tk.Button(
+        objButtonFrame,
+        text="今週の月曜日",
+        command=lambda: set_selected_monday(objThisWeekMonday),
+    ).pack(side=tk.LEFT, padx=2)
+    tk.Button(
+        objButtonFrame,
+        text="来週の月曜日",
+        command=lambda: set_selected_monday(objNextWeekMonday),
+    ).pack(side=tk.LEFT, padx=2)
+    tk.Button(objButtonFrame, text="決定", command=confirm_selection).pack(
+        side=tk.LEFT, padx=8
+    )
+    tk.Button(objButtonFrame, text="キャンセル", command=cancel_selection).pack(
+        side=tk.LEFT, padx=2
+    )
+    objRoot.protocol("WM_DELETE_WINDOW", cancel_selection)
+    objRoot.bind("<Escape>", lambda _objEvent: cancel_selection())
+    objRoot.lift()
+    objRoot.attributes("-topmost", True)
+    objRoot.after_idle(lambda: objRoot.attributes("-topmost", False))
+    objRoot.mainloop()
+    return objSelectedMonday
+
+
+def show_start_monday_cancelled_message() -> None:
+    """開始月曜日の選択キャンセルにより処理を中止することを通知します。"""
+    objRoot = tk.Tk()
+    objRoot.withdraw()
+    messagebox.showerror(
+        "Asahi Order Template Maker",
+        "開始月曜日の選択がキャンセルされました。\n"
+        "処理0004を完了できないため、処理を中止します。",
+        parent=objRoot,
+    )
+    objRoot.destroy()
 
 
 def validate_headers(listValues: list[object], pszSourceName: str) -> None:
@@ -274,6 +421,13 @@ def get_step0003_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Pat
     return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
 
 
+def get_step0004_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Path]:
+    """_step0004.xlsxと_step0004.tsvの出力パスを返します。"""
+    objInputPath: Path = Path(pszInputFileFullPath)
+    objBasePath: Path = objInputPath.with_name(objInputPath.stem + "_step0004")
+    return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
+
+
 def create_temporary_path(objOutputPath: Path, pszSuffix: str) -> Path:
     """出力先と同じフォルダーに一意な一時ファイルパスを作ります。"""
     iFileDescriptor, pszTemporaryPath = tempfile.mkstemp(
@@ -393,8 +547,10 @@ def normalize_template_row(listValues: list[object]) -> list[str]:
     return [normalize_text(objValue) for objValue in listValues[: len(STEP0002_HEADERS)]]
 
 
-def read_step0002_excel_rows(objExcelPath: Path) -> list[list[str]]:
-    """処理0002のExcelを検証し、14列のデータ行を読み取ります。"""
+def read_step0002_excel_rows(
+    objExcelPath: Path, pszStepName: str = "step0002"
+) -> list[list[str]]:
+    """14列テンプレートExcelを検証してデータ行を読み取ります。"""
     objWorkbook: Workbook = load_workbook(objExcelPath, data_only=True)
     listTargetWorksheets: list[Worksheet] = []
     for objWorksheet in objWorkbook.worksheets:
@@ -405,10 +561,13 @@ def read_step0002_excel_rows(objExcelPath: Path) -> list[list[str]]:
         if tupleHeaders == STEP0002_HEADERS:
             listTargetWorksheets.append(objWorksheet)
     if len(listTargetWorksheets) == 0:
-        raise ValueError("step0002の14列ヘッダーを持つExcelシートが見つかりません。")
+        raise ValueError(
+            pszStepName + "の14列ヘッダーを持つExcelシートが見つかりません。"
+        )
     if len(listTargetWorksheets) > 1:
         raise ValueError(
-            "step0002の対象シートが複数見つかりました。対象シート = "
+            pszStepName
+            + "の対象シートが複数見つかりました。対象シート = "
             + ", ".join(objWorksheet.title for objWorksheet in listTargetWorksheets)
         )
     objWorksheet: Worksheet = listTargetWorksheets[0]
@@ -425,16 +584,20 @@ def read_step0002_excel_rows(objExcelPath: Path) -> list[list[str]]:
     return listRows
 
 
-def read_step0002_tsv_rows(objTsvPath: Path) -> list[list[str]]:
-    """処理0002のUTF-8 TSVを検証し、14列のデータ行を読み取ります。"""
+def read_step0002_tsv_rows(
+    objTsvPath: Path, pszStepName: str = "step0002"
+) -> list[list[str]]:
+    """14列テンプレートのUTF-8 TSVを検証してデータ行を読み取ります。"""
     with objTsvPath.open(mode="r", encoding="utf-8", newline="") as objFile:
         listRows: list[list[str]] = list(
             csv.reader(objFile, delimiter="\t", strict=True)
         )
     if not listRows:
-        raise ValueError("step0002のTSVファイルが空です。")
+        raise ValueError(pszStepName + "のTSVファイルが空です。")
     if tuple(normalize_header(pszValue) for pszValue in listRows[0]) != STEP0002_HEADERS:
-        raise ValueError("step0002のTSVヘッダーが仕様どおりの14列ではありません。")
+        raise ValueError(
+            pszStepName + "のTSVヘッダーが仕様どおりの14列ではありません。"
+        )
     listNormalizedRows: list[list[str]] = []
     for iRow, listValues in enumerate(listRows[1:], start=2):
         if len(listValues) != len(STEP0002_HEADERS):
@@ -451,12 +614,15 @@ def read_step0002_tsv_rows(objTsvPath: Path) -> list[list[str]]:
 
 
 def validate_step0002_outputs_match(
-    listExcelRows: list[list[str]], listTsvRows: list[list[str]]
+    listExcelRows: list[list[str]],
+    listTsvRows: list[list[str]],
+    pszStepName: str = "step0002",
 ) -> None:
-    """処理0002のXLSXとTSVの行数・行順・14列すべてが一致するか確認します。"""
+    """14列XLSX・TSVの行数、行順、すべての値が一致するか確認します。"""
     if len(listExcelRows) != len(listTsvRows):
         raise ValueError(
-            "step0002のXLSXとTSVの内容が一致しません。データ行数: XLSX = "
+            pszStepName
+            + "のXLSXとTSVの内容が一致しません。データ行数: XLSX = "
             + str(len(listExcelRows))
             + "、TSV = "
             + str(len(listTsvRows))
@@ -467,7 +633,8 @@ def validate_step0002_outputs_match(
         for iColumn, pszColumnName in enumerate(STEP0002_HEADERS):
             if listExcelRow[iColumn] != listTsvRow[iColumn]:
                 raise ValueError(
-                    "step0002のXLSXとTSVの内容が一致しません。行 = "
+                    pszStepName
+                    + "のXLSXとTSVの内容が一致しません。行 = "
                     + str(iRow)
                     + "、列 = "
                     + pszColumnName
@@ -516,6 +683,73 @@ def save_step0003_tsv_template(
         objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
         objWriter.writerow(STEP0002_HEADERS)
         objWriter.writerows(listStep0003Rows)
+
+
+def validate_step0003_weekday_cycle(listStep0003Rows: list[list[str]]) -> None:
+    """処理0003が7行周期で月～日の順になっていることを確認します。"""
+    if len(listStep0003Rows) % len(WEEKDAYS) != 0:
+        raise ValueError(
+            "step0003のデータ行数が7の倍数ではありません。データ行数 = "
+            + str(len(listStep0003Rows))
+        )
+    for iRowIndex, listValues in enumerate(listStep0003Rows):
+        pszExpectedWeekday: str = WEEKDAYS[iRowIndex % len(WEEKDAYS)]
+        pszActualWeekday: str = listValues[1]
+        if pszActualWeekday != pszExpectedWeekday:
+            raise ValueError(
+                "step0003の曜日順が仕様と一致しません。行 = "
+                + str(iRowIndex + 2)
+                + "、期待値 = "
+                + pszExpectedWeekday
+                + "、実際値 = "
+                + pszActualWeekday
+            )
+
+
+def build_step0004_rows(
+    listStep0003Rows: list[list[str]], objStartMonday: date
+) -> list[list[str]]:
+    """7行ごとに同じ月～日の年月日を納品日列へ設定します。"""
+    validate_start_monday(objStartMonday)
+    validate_step0003_weekday_cycle(listStep0003Rows)
+    listStep0004Rows: list[list[str]] = []
+    for iRowIndex, listStep0003Row in enumerate(listStep0003Rows):
+        objDeliveryDate: date = objStartMonday + timedelta(
+            days=iRowIndex % len(WEEKDAYS)
+        )
+        listStep0004Row: list[str] = listStep0003Row.copy()
+        listStep0004Row[0] = objDeliveryDate.strftime("%Y/%m/%d")
+        listStep0004Rows.append(listStep0004Row)
+    return listStep0004Rows
+
+
+def save_step0004_excel_template(
+    objOutputPath: Path, listStep0004Rows: list[list[str]]
+) -> None:
+    """納品日をExcel日付値として持つ処理0004テンプレートを保存します。"""
+    objWorkbook: Workbook = Workbook()
+    objWorksheet: Worksheet = objWorkbook.active
+    objWorksheet.append(list(STEP0002_HEADERS))
+    for listValues in listStep0004Rows:
+        listExcelValues: list[object] = listValues.copy()
+        listExcelValues[0] = datetime.strptime(listValues[0], "%Y/%m/%d").date()
+        objWorksheet.append(listExcelValues)
+        iOutputRow: int = objWorksheet.max_row
+        objWorksheet.cell(row=iOutputRow, column=1).number_format = "yyyy/mm/dd"
+        if listValues[1] == WEEKDAYS[0]:
+            objWorksheet.cell(row=iOutputRow, column=5).number_format = "@"
+            objWorksheet.cell(row=iOutputRow, column=6).number_format = "@"
+    objWorkbook.save(objOutputPath)
+
+
+def save_step0004_tsv_template(
+    objOutputPath: Path, listStep0004Rows: list[list[str]]
+) -> None:
+    """処理0004のTSVをUTF-8 BOMなし、タブ区切り、CRLFで保存します。"""
+    with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
+        objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
+        objWriter.writerow(STEP0002_HEADERS)
+        objWriter.writerows(listStep0004Rows)
 
 
 def replace_output_files(
@@ -631,8 +865,51 @@ def process_step0003_files(
         raise Step0003Error(str(objException)) from objException
 
 
-def process_input_file(pszInputFileFullPath: str) -> None:
-    """入力から処理0001～処理0003のXLSX・TSVを作成します。"""
+def process_step0004_files(
+    pszInputFileFullPath: str,
+    objStep0003ExcelPath: Path,
+    objStep0003TsvPath: Path,
+    objStartMonday: date,
+) -> tuple[Path, Path, int]:
+    """処理0003の両出力を比較し、同じ1週間を繰り返す処理0004を作成します。"""
+    try:
+        listExcelRows: list[list[str]] = read_step0002_excel_rows(
+            objStep0003ExcelPath, "step0003"
+        )
+        listTsvRows: list[list[str]] = read_step0002_tsv_rows(
+            objStep0003TsvPath, "step0003"
+        )
+        validate_step0002_outputs_match(listExcelRows, listTsvRows, "step0003")
+        listStep0004Rows: list[list[str]] = build_step0004_rows(
+            listExcelRows, objStartMonday
+        )
+
+        objExcelOutputPath, objTsvOutputPath = get_step0004_output_file_paths(
+            pszInputFileFullPath
+        )
+        objTemporaryExcelPath: Path = create_temporary_path(objExcelOutputPath, ".xlsx")
+        objTemporaryTsvPath: Path = create_temporary_path(objTsvOutputPath, ".tsv")
+        try:
+            save_step0004_excel_template(objTemporaryExcelPath, listStep0004Rows)
+            save_step0004_tsv_template(objTemporaryTsvPath, listStep0004Rows)
+            replace_output_files(
+                objTemporaryExcelPath,
+                objTemporaryTsvPath,
+                objExcelOutputPath,
+                objTsvOutputPath,
+            )
+        finally:
+            for objTemporaryPath in (objTemporaryExcelPath, objTemporaryTsvPath):
+                if objTemporaryPath.exists():
+                    objTemporaryPath.unlink()
+        return objExcelOutputPath, objTsvOutputPath, len(listStep0004Rows)
+    except Exception as objException:
+        raise Step0004Error(str(objException)) from objException
+
+
+def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
+    """入力から処理0001～処理0004のXLSX・TSVを作成します。"""
+    validate_start_monday(objStartMonday)
     pszValidatedPath: str = validate_input_path(pszInputFileFullPath)
     pszExtension: str = os.path.splitext(pszValidatedPath)[1].lower()
     if pszExtension == ".xlsx":
@@ -667,34 +944,50 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         objStep0003ExcelPath,
         objStep0003TsvPath,
         iProductCount,
-        iStep0003RowCount,
+        _,
     ) = process_step0003_files(
         pszValidatedPath,
         objStep0002ExcelPath,
         objStep0002TsvPath,
     )
+    objStep0004ExcelPath, objStep0004TsvPath, iStep0004RowCount = (
+        process_step0004_files(
+            pszValidatedPath,
+            objStep0003ExcelPath,
+            objStep0003TsvPath,
+            objStartMonday,
+        )
+    )
     remove_old_error_file(pszValidatedPath)
     print("朝日注文テンプレートファイルを作成しました。")
     print("Input: " + pszValidatedPath)
+    print("Start Monday: " + objStartMonday.strftime("%Y/%m/%d"))
     print("Step0001 Excel: " + str(objExcelOutputPath))
     print("Step0001 TSV: " + str(objTsvOutputPath))
     print("Step0002 Excel: " + str(objStep0002ExcelPath))
     print("Step0002 TSV: " + str(objStep0002TsvPath))
     print("Step0003 Excel: " + str(objStep0003ExcelPath))
     print("Step0003 TSV: " + str(objStep0003TsvPath))
+    print("Step0004 Excel: " + str(objStep0004ExcelPath))
+    print("Step0004 TSV: " + str(objStep0004TsvPath))
     print("Products: " + str(iProductCount))
-    print("Step0003 Rows: " + str(iStep0003RowCount))
+    print("Step0004 Rows: " + str(iStep0004RowCount))
 
 
 def main() -> int:
     """引数を確認して処理し、成功0・失敗1の終了コードを返します。"""
-    if len(sys.argv) != 2:
+    bHasStartMondayArgument: bool = len(sys.argv) == 4 and sys.argv[1] == "--start-monday"
+    bHasOnlyInputArgument: bool = len(sys.argv) == 2
+    if not bHasStartMondayArgument and not bHasOnlyInputArgument:
         pszScriptFileName: str = os.path.basename(__file__)
         pszErrorMessage: str = (
-            "Error: 入力ファイルパスを1件指定してください。\n"
+            "Error: 入力ファイルパスと開始月曜日を正しく指定してください。\n"
             + "Usage: python "
             + pszScriptFileName
             + " <input_file_path>\n"
+            + "With date: python "
+            + pszScriptFileName
+            + " --start-monday YYYY-MM-DD <input_file_path>\n"
         )
         print(pszErrorMessage, file=sys.stderr, end="")
         pszErrorFileFullPath: str = os.path.splitext(pszScriptFileName)[0] + "_error_argument.txt"
@@ -706,9 +999,31 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
-    pszInputFileFullPath: str = sys.argv[1]
+    pszInputFileFullPath: str = sys.argv[3] if bHasStartMondayArgument else sys.argv[1]
     try:
-        process_input_file(pszInputFileFullPath)
+        try:
+            if bHasStartMondayArgument:
+                objStartMonday: date = parse_start_monday(sys.argv[2])
+            else:
+                objSelectedMonday: date | None = select_start_monday()
+                if objSelectedMonday is None:
+                    show_start_monday_cancelled_message()
+                    raise Step0004Error(
+                        "開始月曜日の選択がキャンセルされたため、処理0004を中止しました。"
+                    )
+                objStartMonday = objSelectedMonday
+        except Step0004Error:
+            raise
+        except Exception as objException:
+            raise Step0004Error(str(objException)) from objException
+        process_input_file(pszInputFileFullPath, objStartMonday)
+    except Step0004Error as objException:
+        report_processing_error(
+            pszInputFileFullPath,
+            "朝日注文テンプレート処理0004",
+            str(objException),
+        )
+        return 1
     except Step0003Error as objException:
         report_processing_error(
             pszInputFileFullPath,
