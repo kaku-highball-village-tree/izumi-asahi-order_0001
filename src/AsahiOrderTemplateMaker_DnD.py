@@ -105,7 +105,7 @@ def draw_instruction_text(iWindowHandle: int) -> None:
     pszInstructionText: str = (
         "Excel、TSV、またはCSVファイルをこのウィンドウにドラッグ＆ドロップしてください。\n"
         "開始月曜日をカレンダーから選択します。初期選択は来週の月曜日です。\n"
-        "同じフォルダーにstep0001～step0004のXLSX・TSVを作成します。\n"
+        "同じフォルダーにstep0001～step0005のXLSX・TSVを作成します。\n"
         "既存の出力ファイルは自動的に上書きします。\n"
         "キャンセルまたはエラー時は <元ファイル名>_error.txt を出力します。"
     )

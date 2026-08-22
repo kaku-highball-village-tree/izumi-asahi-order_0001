@@ -8,7 +8,9 @@
 ###############################################################
 
 import csv
+import hashlib
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -40,6 +42,42 @@ STEP0002_HEADERS: tuple[str, ...] = (
     "単位",
 )
 WEEKDAYS: tuple[str, ...] = ("月", "火", "水", "木", "金", "土", "日")
+STORE_DEFINITIONS: tuple[tuple[str, str], ...] = (
+    ("2", "光の森"), ("3", "学園"), ("4", "ゆめタウン呉"),
+    ("6", "サンモール"), ("7", "大川"), ("10", "中津"),
+    ("11", "夢彩都"), ("13", "安古市"), ("16", "倉敷"),
+    ("17", "大牟田"), ("18", "南岩国"), ("19", "平島"),
+    ("20", "蔵王"), ("21", "サンピアン"), ("22", "柳井"),
+    ("24", "高梁"), ("25", "東広島"), ("26", "黒瀬"),
+    ("28", "井原"), ("29", "江田島"), ("30", "八代"),
+    ("31", "吉田"), ("33", "久世"), ("34", "長府"),
+    ("35", "新南陽"), ("36", "山陽"), ("37", "浜田"),
+    ("38", "益田"), ("39", "斐川"), ("40", "高松"),
+    ("41", "行橋"), ("45", "川尻"), ("46", "武雄"),
+    ("47", "YM浜田"), ("48", "美作"), ("49", "八本松"),
+    ("50", "防府"), ("51", "邑久"), ("52", "遠賀"),
+    ("53", "筑紫野"), ("54", "宇部"), ("55", "丹波"),
+    ("56", "山口"), ("57", "大竹"), ("58", "博多"),
+    ("59", "八女"), ("61", "赤間"), ("63", "神西"),
+    ("66", "八木"), ("68", "府中"), ("69", "八幡"),
+    ("70", "久留米"), ("74", "己斐"), ("76", "はません"),
+    ("80", "尾道"), ("82", "沼田"), ("86", "シティモール"),
+    ("101", "佐賀"), ("102", "別府"), ("103", "広島"),
+    ("104", "出雲"), ("105", "三豊"), ("106", "丸亀"),
+    ("107", "みゆき"), ("108", "ゆめシティ"), ("109", "うきは"),
+    ("110", "津山"), ("111", "徳島"), ("112", "小倉東"),
+    ("114", "下関駅"), ("115", "新宮"), ("116", "西栄"),
+    ("117", "田崎"), ("118", "玉名"), ("119", "阿賀"),
+    ("120", "二葉の里"), ("121", "下関"), ("122", "松橋"),
+    ("123", "大江"), ("124", "柳川"), ("125", "廿日市"),
+    ("126", "YMさが"), ("127", "筑後"), ("128", "徳山"),
+    ("131", "ＬＥＣＴ"), ("132", "南行橋"), ("133", "江津"),
+    ("134", "福津"), ("135", "姫路"), ("136", "下松"),
+    ("139", "福山"), ("140", "城野"), ("141", "南小野田"),
+    ("143", "日田"), ("144", "青山"), ("145", "西条"),
+    ("146", "飯塚"), ("147", "新大村"), ("148", "祇園"),
+    ("151", "五日市"),
+)
 SUPPORTED_EXTENSIONS: set[str] = {".xlsx", ".tsv", ".csv"}
 
 
@@ -62,6 +100,10 @@ class Step0003Error(Exception):
 
 class Step0004Error(Exception):
     """処理0004で発生したエラーであることを呼び出し元へ伝えます。"""
+
+
+class Step0005Error(Exception):
+    """処理0005で発生したエラーであることを呼び出し元へ伝えます。"""
 
 
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
@@ -428,6 +470,13 @@ def get_step0004_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Pat
     return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
 
 
+def get_step0005_output_file_paths(pszInputFileFullPath: str) -> tuple[Path, Path]:
+    """_step0005.xlsxと_step0005.tsvの出力パスを返します。"""
+    objInputPath: Path = Path(pszInputFileFullPath)
+    objBasePath: Path = objInputPath.with_name(objInputPath.stem + "_step0005")
+    return objBasePath.with_suffix(".xlsx"), objBasePath.with_suffix(".tsv")
+
+
 def create_temporary_path(objOutputPath: Path, pszSuffix: str) -> Path:
     """出力先と同じフォルダーに一意な一時ファイルパスを作ります。"""
     iFileDescriptor, pszTemporaryPath = tempfile.mkstemp(
@@ -544,7 +593,15 @@ def validate_step0001_outputs_match(
 
 def normalize_template_row(listValues: list[object]) -> list[str]:
     """処理0002の14列を、空セルを空文字にした比較・出力用文字列へ変換します。"""
-    return [normalize_text(objValue) for objValue in listValues[: len(STEP0002_HEADERS)]]
+    listNormalizedValues: list[str] = []
+    for iColumn, objValue in enumerate(listValues[: len(STEP0002_HEADERS)]):
+        if iColumn == 0 and isinstance(objValue, datetime):
+            listNormalizedValues.append(objValue.date().strftime("%Y/%m/%d"))
+        elif iColumn == 0 and isinstance(objValue, date):
+            listNormalizedValues.append(objValue.strftime("%Y/%m/%d"))
+        else:
+            listNormalizedValues.append(normalize_text(objValue))
+    return listNormalizedValues
 
 
 def read_step0002_excel_rows(
@@ -752,6 +809,121 @@ def save_step0004_tsv_template(
         objWriter.writerows(listStep0004Rows)
 
 
+def validate_store_definitions() -> None:
+    """店舗定義が100件で、店舗番号が一意かつ端点が仕様どおりか確認します。"""
+    if len(STORE_DEFINITIONS) != 100:
+        raise ValueError(
+            "店舗定義数が100件ではありません。店舗定義数 = "
+            + str(len(STORE_DEFINITIONS))
+        )
+    listStoreCodes: list[str] = [pszCode for pszCode, _ in STORE_DEFINITIONS]
+    if len(set(listStoreCodes)) != len(listStoreCodes):
+        raise ValueError("店舗番号が重複しています。")
+    if STORE_DEFINITIONS[0] != ("2", "光の森"):
+        raise ValueError("先頭の店舗定義が2／光の森ではありません。")
+    if STORE_DEFINITIONS[-1] != ("151", "五日市"):
+        raise ValueError("末尾の店舗定義が151／五日市ではありません。")
+
+
+def build_step0005_random_seed(
+    pszInputFileFullPath: str, objStartMonday: date
+) -> int:
+    """入力ベース名と開始月曜日から再現可能なSHA-256整数シードを作ります。"""
+    pszSeedText: str = (
+        Path(pszInputFileFullPath).stem + "|" + objStartMonday.isoformat()
+    )
+    objDigest: bytes = hashlib.sha256(pszSeedText.encode("utf-8")).digest()
+    return int.from_bytes(objDigest, byteorder="big", signed=False)
+
+
+def generate_store_random_value(objRandom: random.Random) -> int | None:
+    """空欄70%、1が20%、2～5が各2.5%となる値を1つ抽選します。"""
+    iRandomBucket: int = objRandom.randint(1, 40)
+    if iRandomBucket <= 28:
+        return None
+    if iRandomBucket <= 36:
+        return 1
+    return iRandomBucket - 35
+
+
+def build_step0005_rows(
+    listStep0004Rows: list[list[str]],
+    pszInputFileFullPath: str,
+    objStartMonday: date,
+) -> list[list[object]]:
+    """処理0004の14列へ、独立抽選した100店舗分の値を追加します。"""
+    validate_store_definitions()
+    objRandom = random.Random(
+        build_step0005_random_seed(pszInputFileFullPath, objStartMonday)
+    )
+    listStep0005Rows: list[list[object]] = []
+    iExpectedColumnCount: int = len(STEP0002_HEADERS) + len(STORE_DEFINITIONS)
+    for listStep0004Row in listStep0004Rows:
+        if len(listStep0004Row) != len(STEP0002_HEADERS):
+            raise ValueError(
+                "step0004のデータ行が14列ではありません。列数 = "
+                + str(len(listStep0004Row))
+            )
+        listStoreValues: list[int | None] = [
+            generate_store_random_value(objRandom) for _ in STORE_DEFINITIONS
+        ]
+        listStep0005Row: list[object] = listStep0004Row.copy() + listStoreValues
+        if len(listStep0005Row) != iExpectedColumnCount:
+            raise ValueError(
+                "step0005のデータ行が114列ではありません。列数 = "
+                + str(len(listStep0005Row))
+            )
+        listStep0005Rows.append(listStep0005Row)
+    return listStep0005Rows
+
+
+def save_step0005_excel_template(
+    objOutputPath: Path, listStep0005Rows: list[list[object]]
+) -> None:
+    """2行ヘッダーと100店舗列を持つ処理0005のExcelを保存します。"""
+    objWorkbook: Workbook = Workbook()
+    objWorksheet: Worksheet = objWorkbook.active
+    listStoreCodes: list[str] = [pszCode for pszCode, _ in STORE_DEFINITIONS]
+    listStoreNames: list[str] = [pszName for _, pszName in STORE_DEFINITIONS]
+    objWorksheet.append([""] * len(STEP0002_HEADERS) + listStoreCodes)
+    objWorksheet.append(list(STEP0002_HEADERS) + listStoreNames)
+    for iColumn in range(len(STEP0002_HEADERS) + 1, len(STEP0002_HEADERS) + 101):
+        objWorksheet.cell(row=1, column=iColumn).number_format = "@"
+    for listValues in listStep0005Rows:
+        listExcelValues: list[object] = listValues.copy()
+        listExcelValues[0] = datetime.strptime(str(listValues[0]), "%Y/%m/%d").date()
+        objWorksheet.append(listExcelValues)
+        iOutputRow: int = objWorksheet.max_row
+        objWorksheet.cell(row=iOutputRow, column=1).number_format = "yyyy/mm/dd"
+        objWorksheet.cell(row=iOutputRow, column=5).number_format = "@"
+        objWorksheet.cell(row=iOutputRow, column=6).number_format = "@"
+    if objWorksheet.max_column != 114:
+        raise ValueError(
+            "step0005 Excelの最終列がDJ列ではありません。列数 = "
+            + str(objWorksheet.max_column)
+        )
+    objWorkbook.save(objOutputPath)
+
+
+def save_step0005_tsv_template(
+    objOutputPath: Path, listStep0005Rows: list[list[object]]
+) -> None:
+    """処理0005の114列TSVをUTF-8 BOMなし、CRLFで保存します。"""
+    listStoreCodes: list[str] = [pszCode for pszCode, _ in STORE_DEFINITIONS]
+    listStoreNames: list[str] = [pszName for _, pszName in STORE_DEFINITIONS]
+    with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
+        objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
+        objWriter.writerow([""] * len(STEP0002_HEADERS) + listStoreCodes)
+        objWriter.writerow(list(STEP0002_HEADERS) + listStoreNames)
+        for listValues in listStep0005Rows:
+            if len(listValues) != 114:
+                raise ValueError(
+                    "step0005 TSVのデータ行が114列ではありません。列数 = "
+                    + str(len(listValues))
+                )
+            objWriter.writerow(listValues)
+
+
 def replace_output_files(
     objTemporaryExcelPath: Path,
     objTemporaryTsvPath: Path,
@@ -907,8 +1079,50 @@ def process_step0004_files(
         raise Step0004Error(str(objException)) from objException
 
 
+def process_step0005_files(
+    pszInputFileFullPath: str,
+    objStep0004ExcelPath: Path,
+    objStep0004TsvPath: Path,
+    objStartMonday: date,
+) -> tuple[Path, Path, int]:
+    """処理0004の両出力を比較し、100店舗列を持つ処理0005を作成します。"""
+    try:
+        listExcelRows: list[list[str]] = read_step0002_excel_rows(
+            objStep0004ExcelPath, "step0004"
+        )
+        listTsvRows: list[list[str]] = read_step0002_tsv_rows(
+            objStep0004TsvPath, "step0004"
+        )
+        validate_step0002_outputs_match(listExcelRows, listTsvRows, "step0004")
+        listStep0005Rows: list[list[object]] = build_step0005_rows(
+            listExcelRows, pszInputFileFullPath, objStartMonday
+        )
+
+        objExcelOutputPath, objTsvOutputPath = get_step0005_output_file_paths(
+            pszInputFileFullPath
+        )
+        objTemporaryExcelPath: Path = create_temporary_path(objExcelOutputPath, ".xlsx")
+        objTemporaryTsvPath: Path = create_temporary_path(objTsvOutputPath, ".tsv")
+        try:
+            save_step0005_excel_template(objTemporaryExcelPath, listStep0005Rows)
+            save_step0005_tsv_template(objTemporaryTsvPath, listStep0005Rows)
+            replace_output_files(
+                objTemporaryExcelPath,
+                objTemporaryTsvPath,
+                objExcelOutputPath,
+                objTsvOutputPath,
+            )
+        finally:
+            for objTemporaryPath in (objTemporaryExcelPath, objTemporaryTsvPath):
+                if objTemporaryPath.exists():
+                    objTemporaryPath.unlink()
+        return objExcelOutputPath, objTsvOutputPath, len(listStep0005Rows)
+    except Exception as objException:
+        raise Step0005Error(str(objException)) from objException
+
+
 def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
-    """入力から処理0001～処理0004のXLSX・TSVを作成します。"""
+    """入力から処理0001～処理0005のXLSX・TSVを作成します。"""
     validate_start_monday(objStartMonday)
     pszValidatedPath: str = validate_input_path(pszInputFileFullPath)
     pszExtension: str = os.path.splitext(pszValidatedPath)[1].lower()
@@ -950,11 +1164,19 @@ def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
         objStep0002ExcelPath,
         objStep0002TsvPath,
     )
-    objStep0004ExcelPath, objStep0004TsvPath, iStep0004RowCount = (
+    objStep0004ExcelPath, objStep0004TsvPath, _ = (
         process_step0004_files(
             pszValidatedPath,
             objStep0003ExcelPath,
             objStep0003TsvPath,
+            objStartMonday,
+        )
+    )
+    objStep0005ExcelPath, objStep0005TsvPath, iStep0005RowCount = (
+        process_step0005_files(
+            pszValidatedPath,
+            objStep0004ExcelPath,
+            objStep0004TsvPath,
             objStartMonday,
         )
     )
@@ -970,8 +1192,10 @@ def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
     print("Step0003 TSV: " + str(objStep0003TsvPath))
     print("Step0004 Excel: " + str(objStep0004ExcelPath))
     print("Step0004 TSV: " + str(objStep0004TsvPath))
+    print("Step0005 Excel: " + str(objStep0005ExcelPath))
+    print("Step0005 TSV: " + str(objStep0005TsvPath))
     print("Products: " + str(iProductCount))
-    print("Step0004 Rows: " + str(iStep0004RowCount))
+    print("Step0005 Rows: " + str(iStep0005RowCount))
 
 
 def main() -> int:
@@ -1017,6 +1241,13 @@ def main() -> int:
         except Exception as objException:
             raise Step0004Error(str(objException)) from objException
         process_input_file(pszInputFileFullPath, objStartMonday)
+    except Step0005Error as objException:
+        report_processing_error(
+            pszInputFileFullPath,
+            "朝日注文テンプレート処理0005",
+            str(objException),
+        )
+        return 1
     except Step0004Error as objException:
         report_processing_error(
             pszInputFileFullPath,
