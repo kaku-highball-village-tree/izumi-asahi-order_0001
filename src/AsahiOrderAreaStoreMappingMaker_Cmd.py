@@ -23,14 +23,13 @@ from openpyxl.worksheet.worksheet import Worksheet
 TARGET_WORKSHEET_NAMES: tuple[str, str] = ("本州マグロ(週間)", "割り")
 SUPPORTED_EXTENSIONS: set[str] = {".xlsx"}
 MAX_BACKUP_NUMBER: int = 9999
-AREA_STORE_MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_step0001.tsv"
-AREA_STORE_MAPPING_HEADERS: tuple[str, str, str, str, str] = (
-    "エリア名",
+AREA_STORE_MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_週間_step0001.tsv"
+AREA_STORE_MAPPING_HEADERS: tuple[str, str, str] = (
+    "配送センター名",
     "店舗コード",
-    "店舗略称",
-    "APEX店舗コード",
-    "APEX店舗名",
+    "店舗名",
 )
+CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
@@ -211,43 +210,189 @@ def read_tsv_rows(objInputPath: Path) -> list[list[str]]:
         return list(csv.reader(objFile, delimiter="\t", strict=True))
 
 
-def is_store_data_row(listValues: list[str]) -> bool:
-    """2～6列目がすべて空白以外の値を持つ店舗データ行か返します。"""
-    if len(listValues) < 6:
-        return False
-    return all(pszValue.strip() != "" for pszValue in listValues[1:6])
+def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
+    """指定列が存在すれば値を返し、列不足なら空文字を返します。"""
+    if iColumnIndex >= len(listValues):
+        return ""
+    return listValues[iColumnIndex]
 
 
-def build_area_store_mapping_rows(listRows: list[list[str]]) -> list[list[str]]:
-    """単位行より後ろから店舗データの2～6列目を抽出します。"""
-    iUnitRowIndex: int | None = None
+def normalize_distribution_center_name(pszValue: str) -> str:
+    """配送センター名の前後空白を除き、括弧を半角へ統一します。"""
+    return pszValue.strip().replace("（", "(").replace("）", ")")
+
+
+def is_distribution_center_name(pszValue: str) -> bool:
+    """丸数字で始まりセンターを含む配送センター見出しか返します。"""
+    pszNormalizedValue: str = normalize_distribution_center_name(pszValue)
+    return (
+        pszNormalizedValue != ""
+        and pszNormalizedValue[0] in CIRCLED_NUMBERS
+        and "センター" in pszNormalizedValue
+    )
+
+
+def find_distribution_centers(
+    listRows: list[list[str]],
+) -> list[tuple[int, int, str]]:
+    """全セルから配送センター見出しの行・列・正規化名を返します。"""
+    listCenters: list[tuple[int, int, str]] = []
     for iRowIndex, listValues in enumerate(listRows):
-        if len(listValues) >= 6 and listValues[5] == "単位":
-            iUnitRowIndex = iRowIndex
-            break
-    if iUnitRowIndex is None:
-        raise ValueError("割りTSV内に6列目が「単位」の行が見つかりません。")
-    iDataStartRowIndex: int | None = None
-    for iRowIndex in range(iUnitRowIndex + 1, len(listRows)):
-        if is_store_data_row(listRows[iRowIndex]):
-            iDataStartRowIndex = iRowIndex
-            break
-    if iDataStartRowIndex is None:
+        for iColumnIndex, pszValue in enumerate(listValues):
+            if is_distribution_center_name(pszValue):
+                listCenters.append(
+                    (
+                        iRowIndex,
+                        iColumnIndex,
+                        normalize_distribution_center_name(pszValue),
+                    )
+                )
+    if not listCenters:
+        raise ValueError("配送センター見出しが見つかりません。")
+    return listCenters
+
+
+def find_store_groups(listRows: list[list[str]]) -> list[tuple[int, int, int]]:
+    """店舗コードと末尾が店舗名の隣接ヘッダーをすべて返します。"""
+    listStoreGroups: list[tuple[int, int, int]] = []
+    for iRowIndex, listValues in enumerate(listRows):
+        for iColumnIndex, pszValue in enumerate(listValues):
+            if pszValue != "店舗コード":
+                continue
+            pszStoreNameHeader: str = get_row_value(listValues, iColumnIndex + 1)
+            if pszStoreNameHeader.endswith("店舗名"):
+                listStoreGroups.append(
+                    (iRowIndex, iColumnIndex, iColumnIndex + 1)
+                )
+    if not listStoreGroups:
+        raise ValueError("店舗コード・店舗名の組が見つかりません。")
+    return listStoreGroups
+
+
+def assign_distribution_center(
+    tupleStoreGroup: tuple[int, int, int],
+    listCenters: list[tuple[int, int, str]],
+) -> tuple[int, int, str]:
+    """店舗グループの上方で最も近い見出し行から所属センターを返します。"""
+    iHeaderRowIndex, iStoreCodeColumnIndex, _ = tupleStoreGroup
+    listPreviousCenters: list[tuple[int, int, str]] = [
+        tupleCenter
+        for tupleCenter in listCenters
+        if tupleCenter[0] <= iHeaderRowIndex
+    ]
+    if not listPreviousCenters:
         raise ValueError(
-            "6列目が「単位」の行より後ろに店舗データが見つかりません。"
+            "店舗グループより上に配送センター見出しがありません。行 = "
+            + str(iHeaderRowIndex + 1)
+            + "、列 = "
+            + str(iStoreCodeColumnIndex + 1)
         )
+    iNearestCenterRowIndex: int = max(
+        tupleCenter[0] for tupleCenter in listPreviousCenters
+    )
+    listSameRowCenters: list[tuple[int, int, str]] = sorted(
+        (
+            tupleCenter
+            for tupleCenter in listPreviousCenters
+            if tupleCenter[0] == iNearestCenterRowIndex
+            and tupleCenter[1] <= iStoreCodeColumnIndex
+        ),
+        key=lambda tupleCenter: tupleCenter[1],
+    )
+    if not listSameRowCenters:
+        raise ValueError(
+            "店舗グループを配送センターへ関連付けできません。行 = "
+            + str(iHeaderRowIndex + 1)
+            + "、列 = "
+            + str(iStoreCodeColumnIndex + 1)
+        )
+    return listSameRowCenters[-1]
+
+
+def extract_store_group_rows(
+    listRows: list[list[str]],
+    tupleStoreGroup: tuple[int, int, int],
+    pszDistributionCenterName: str,
+) -> list[list[str]]:
+    """店舗グループのヘッダー直後から小計まで店舗コード・店舗名を返します。"""
+    iHeaderRowIndex, iStoreCodeColumnIndex, iStoreNameColumnIndex = tupleStoreGroup
     listMappingRows: list[list[str]] = []
-    for listValues in listRows[iDataStartRowIndex:]:
-        if not is_store_data_row(listValues):
+    bFoundSubtotal: bool = False
+    for listValues in listRows[iHeaderRowIndex + 1 :]:
+        pszStoreCode: str = get_row_value(listValues, iStoreCodeColumnIndex)
+        pszStoreName: str = get_row_value(listValues, iStoreNameColumnIndex)
+        if pszStoreCode.strip() == "小計":
+            bFoundSubtotal = True
+            break
+        if pszStoreCode.strip() == "" or pszStoreName.strip() == "":
             continue
-        listMappingRows.append(listValues[1:6])
+        if pszStoreCode == "店舗コード" or pszStoreName.endswith("店舗名"):
+            continue
+        listMappingRows.append(
+            [pszDistributionCenterName, pszStoreCode, pszStoreName]
+        )
+    if not bFoundSubtotal:
+        raise ValueError(
+            "店舗グループの小計行が見つかりません。配送センター = "
+            + pszDistributionCenterName
+            + "、ヘッダー行 = "
+            + str(iHeaderRowIndex + 1)
+            + "、店舗コード列 = "
+            + str(iStoreCodeColumnIndex + 1)
+        )
+    if not listMappingRows:
+        raise ValueError(
+            "店舗グループに店舗データが見つかりません。配送センター = "
+            + pszDistributionCenterName
+            + "、ヘッダー行 = "
+            + str(iHeaderRowIndex + 1)
+            + "、店舗コード列 = "
+            + str(iStoreCodeColumnIndex + 1)
+        )
     return listMappingRows
+
+
+def build_area_store_mapping_rows(
+    listRows: list[list[str]],
+) -> tuple[list[list[str]], int, int]:
+    """配送センターと全店舗グループを検出して3列の対応表を返します。"""
+    listCenters: list[tuple[int, int, str]] = find_distribution_centers(listRows)
+    listStoreGroups: list[tuple[int, int, int]] = find_store_groups(listRows)
+    listAssignedGroups: list[
+        tuple[tuple[int, int, str], tuple[int, int, int]]
+    ] = [
+        (assign_distribution_center(tupleStoreGroup, listCenters), tupleStoreGroup)
+        for tupleStoreGroup in listStoreGroups
+    ]
+    listAssignedGroups.sort(
+        key=lambda tupleAssignment: (
+            tupleAssignment[0][0],
+            tupleAssignment[0][1],
+            tupleAssignment[1][1],
+            tupleAssignment[1][0],
+        )
+    )
+    listMappingRows: list[list[str]] = []
+    for tupleCenter, tupleStoreGroup in listAssignedGroups:
+        listMappingRows.extend(
+            extract_store_group_rows(
+                listRows,
+                tupleStoreGroup,
+                tupleCenter[2],
+            )
+        )
+    if not listMappingRows:
+        raise ValueError("店舗データが見つかりません。")
+    iCenterCount: int = len(
+        {(tupleCenter[0], tupleCenter[1]) for tupleCenter, _ in listAssignedGroups}
+    )
+    return listMappingRows, iCenterCount, len(listAssignedGroups)
 
 
 def save_area_store_mapping_tsv(
     objOutputPath: Path, listMappingRows: list[list[str]]
 ) -> None:
-    """5列ヘッダーと店舗対応データをUTF-8 TSVへ保存します。"""
+    """3列ヘッダーと週間店舗対応データをUTF-8 TSVへ保存します。"""
     with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
         objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
         objWriter.writerow(AREA_STORE_MAPPING_HEADERS)
@@ -255,19 +400,21 @@ def save_area_store_mapping_tsv(
 
 
 def get_area_store_mapping_output_path(objInputTsvPath: Path) -> Path:
-    """割りTSVと同じフォルダーに作る店舗対応表TSVのパスを返します。"""
+    """週間TSVと同じフォルダーに作る店舗対応表TSVのパスを返します。"""
     return objInputTsvPath.with_name(AREA_STORE_MAPPING_FILE_NAME)
 
 
 def process_area_store_mapping_file(
     objInputTsvPath: Path,
-) -> tuple[Path, int]:
-    """割りTSVから店舗対応表を独立して作成します。"""
+) -> tuple[Path, int, int, int]:
+    """本州マグロ週間TSVから店舗対応表を独立して作成します。"""
     if not objInputTsvPath.exists() or not objInputTsvPath.is_file():
-        raise ValueError("割りTSVが見つかりません。Path = " + str(objInputTsvPath))
+        raise ValueError("週間TSVが見つかりません。Path = " + str(objInputTsvPath))
     listRows: list[list[str]] = read_tsv_rows(objInputTsvPath)
     try:
-        listMappingRows: list[list[str]] = build_area_store_mapping_rows(listRows)
+        listMappingRows, iCenterCount, iGroupCount = build_area_store_mapping_rows(
+            listRows
+        )
     except ValueError as objException:
         raise ValueError(
             str(objException) + " Path = " + str(objInputTsvPath)
@@ -280,7 +427,7 @@ def process_area_store_mapping_file(
     finally:
         if objTemporaryPath.exists():
             objTemporaryPath.unlink()
-    return objOutputPath, len(listMappingRows)
+    return objOutputPath, len(listMappingRows), iCenterCount, iGroupCount
 
 
 def find_backup_numbers(objOutputPath: Path) -> list[int]:
@@ -354,8 +501,10 @@ def build_warning_text(
         listLines.append(
             "旧TSVのバックアップパス: " + str(dictBackupPaths[pszWorksheetName])
         )
-    if "割り" in listMissingWorksheetNames:
-        listLines.append("店舗対応表: 割りシートがないため作成しませんでした。")
+    if "本州マグロ(週間)" in listMissingWorksheetNames:
+        listLines.append(
+            "週間店舗対応表: 本州マグロ(週間)シートがないため作成しませんでした。"
+        )
         if objMappingBackupPath is not None:
             listLines.append("旧店舗対応表の変更前パス: " + str(objMappingOutputPath))
             listLines.append(
@@ -363,7 +512,7 @@ def build_warning_text(
                 + str(objMappingBackupPath)
             )
     else:
-        listLines.append("作成した店舗対応表: " + str(objMappingOutputPath))
+        listLines.append("作成した週間店舗対応表: " + str(objMappingOutputPath))
     return "\n".join(listLines) + "\n"
 
 
@@ -426,7 +575,7 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         for pszWorksheetName in TARGET_WORKSHEET_NAMES
     }
     objMappingOutputPath: Path = get_area_store_mapping_output_path(
-        dictOutputPaths["割り"]
+        dictOutputPaths["本州マグロ(週間)"]
     )
     dictBackupPaths: dict[str, Path] = {}
     for pszWorksheetName in listMissingWorksheetNames:
@@ -436,7 +585,10 @@ def process_input_file(pszInputFileFullPath: str) -> None:
                 objMissingOutputPath
             )
     objMappingBackupPath: Path | None = None
-    if "割り" in listMissingWorksheetNames and objMappingOutputPath.exists():
+    if (
+        "本州マグロ(週間)" in listMissingWorksheetNames
+        and objMappingOutputPath.exists()
+    ):
         objMappingBackupPath = get_next_backup_path(objMappingOutputPath)
     dictTemporaryPaths: dict[Path, Path] = {}
     objWarningPath: Path = Path(get_warning_file_full_path(pszValidatedPath))
@@ -485,10 +637,17 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         )
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
-    if "割り" in dictWorksheetResults:
+    iMappingCenterCount: int = 0
+    iMappingGroupCount: int = 0
+    if "本州マグロ(週間)" in dictWorksheetResults:
         try:
-            objCreatedMappingPath, iMappingRowCount = process_area_store_mapping_file(
-                dictOutputPaths["割り"]
+            (
+                objCreatedMappingPath,
+                iMappingRowCount,
+                iMappingCenterCount,
+                iMappingGroupCount,
+            ) = process_area_store_mapping_file(
+                dictOutputPaths["本州マグロ(週間)"]
             )
         except Exception:
             rename_output_to_backup(objMappingOutputPath)
@@ -511,9 +670,14 @@ def process_input_file(pszInputFileFullPath: str) -> None:
     if listMissingWorksheetNames:
         print("Warning File: " + str(objWarningPath))
     if objCreatedMappingPath is not None:
-        print("Area Store Mapping Input: " + str(dictOutputPaths["割り"]))
-        print("Area Store Mapping TSV: " + str(objCreatedMappingPath))
-        print("Area Store Mapping Rows: " + str(iMappingRowCount))
+        print(
+            "Weekly Area Store Mapping Input: "
+            + str(dictOutputPaths["本州マグロ(週間)"])
+        )
+        print("Weekly Area Store Mapping TSV: " + str(objCreatedMappingPath))
+        print("Weekly Area Store Mapping Rows: " + str(iMappingRowCount))
+        print("Weekly Area Store Mapping Centers: " + str(iMappingCenterCount))
+        print("Weekly Area Store Mapping Groups: " + str(iMappingGroupCount))
 
 
 def main() -> int:
