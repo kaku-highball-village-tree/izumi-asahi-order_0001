@@ -29,6 +29,14 @@ AREA_STORE_MAPPING_HEADERS: tuple[str, str, str] = (
     "店舗コード",
     "店舗名",
 )
+ALLOCATION_MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_割り_step0001.tsv"
+ALLOCATION_MAPPING_HEADERS: tuple[str, str, str, str, str] = (
+    "エリア名",
+    "店舗コード",
+    "店舗略称",
+    "APEX店舗コード",
+    "APEX店舗名",
+)
 CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
@@ -208,6 +216,75 @@ def read_tsv_rows(objInputPath: Path) -> list[list[str]]:
     """UTF-8のTSVを先頭から終端まで読み取ります。"""
     with objInputPath.open(mode="r", encoding="utf-8", newline="") as objFile:
         return list(csv.reader(objFile, delimiter="\t", strict=True))
+
+
+def is_allocation_store_data_row(listValues: list[str]) -> bool:
+    """割り対応表の2～6列目がすべて空白以外の店舗行か返します。"""
+    if len(listValues) < 6:
+        return False
+    return all(pszValue.strip() != "" for pszValue in listValues[1:6])
+
+
+def build_allocation_mapping_rows(listRows: list[list[str]]) -> list[list[str]]:
+    """単位行より後ろから割り対応表の2～6列目を抽出します。"""
+    iUnitRowIndex: int | None = None
+    for iRowIndex, listValues in enumerate(listRows):
+        if len(listValues) >= 6 and listValues[5] == "単位":
+            iUnitRowIndex = iRowIndex
+            break
+    if iUnitRowIndex is None:
+        raise ValueError("割りTSV内に6列目が「単位」の行が見つかりません。")
+    iDataStartRowIndex: int | None = None
+    for iRowIndex in range(iUnitRowIndex + 1, len(listRows)):
+        if is_allocation_store_data_row(listRows[iRowIndex]):
+            iDataStartRowIndex = iRowIndex
+            break
+    if iDataStartRowIndex is None:
+        raise ValueError(
+            "6列目が「単位」の行より後ろに店舗データが見つかりません。"
+        )
+    return [
+        listValues[1:6]
+        for listValues in listRows[iDataStartRowIndex:]
+        if is_allocation_store_data_row(listValues)
+    ]
+
+
+def get_allocation_mapping_output_path(objInputTsvPath: Path) -> Path:
+    """割りTSVと同じフォルダーに作る割り対応表TSVのパスを返します。"""
+    return objInputTsvPath.with_name(ALLOCATION_MAPPING_FILE_NAME)
+
+
+def save_allocation_mapping_tsv(
+    objOutputPath: Path, listMappingRows: list[list[str]]
+) -> None:
+    """5列ヘッダーと割り対応データをUTF-8 TSVへ保存します。"""
+    with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
+        objWriter = csv.writer(objFile, delimiter="\t", lineterminator="\r\n")
+        objWriter.writerow(ALLOCATION_MAPPING_HEADERS)
+        objWriter.writerows(listMappingRows)
+
+
+def process_allocation_mapping_file(objInputTsvPath: Path) -> tuple[Path, int]:
+    """割りTSVから割り対応表を独立して作成します。"""
+    if not objInputTsvPath.exists() or not objInputTsvPath.is_file():
+        raise ValueError("割りTSVが見つかりません。Path = " + str(objInputTsvPath))
+    listRows: list[list[str]] = read_tsv_rows(objInputTsvPath)
+    try:
+        listMappingRows: list[list[str]] = build_allocation_mapping_rows(listRows)
+    except ValueError as objException:
+        raise ValueError(
+            str(objException) + " Path = " + str(objInputTsvPath)
+        ) from objException
+    objOutputPath: Path = get_allocation_mapping_output_path(objInputTsvPath)
+    objTemporaryPath: Path = create_temporary_path(objOutputPath)
+    try:
+        save_allocation_mapping_tsv(objTemporaryPath, listMappingRows)
+        os.replace(objTemporaryPath, objOutputPath)
+    finally:
+        if objTemporaryPath.exists():
+            objTemporaryPath.unlink()
+    return objOutputPath, len(listMappingRows)
 
 
 def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
@@ -478,8 +555,8 @@ def build_warning_text(
     listMissingWorksheetNames: list[str],
     dictOutputPaths: dict[str, Path],
     dictBackupPaths: dict[str, Path],
-    objMappingOutputPath: Path,
-    objMappingBackupPath: Path | None,
+    dictMappingOutputPaths: dict[str, Path],
+    dictMappingBackupPaths: dict[str, Path],
 ) -> str:
     """未検出シート、作成TSV、旧TSVバックアップを含む警告文を返します。"""
     listLines: list[str] = [
@@ -501,18 +578,23 @@ def build_warning_text(
         listLines.append(
             "旧TSVのバックアップパス: " + str(dictBackupPaths[pszWorksheetName])
         )
-    if "本州マグロ(週間)" in listMissingWorksheetNames:
-        listLines.append(
-            "週間店舗対応表: 本州マグロ(週間)シートがないため作成しませんでした。"
-        )
-        if objMappingBackupPath is not None:
-            listLines.append("旧店舗対応表の変更前パス: " + str(objMappingOutputPath))
+    for pszWorksheetName in TARGET_WORKSHEET_NAMES:
+        objMappingOutputPath: Path = dictMappingOutputPaths[pszWorksheetName]
+        if pszWorksheetName in listMissingWorksheetNames:
             listLines.append(
-                "旧店舗対応表のバックアップパス: "
-                + str(objMappingBackupPath)
+                pszWorksheetName
+                + "対応表: 対象シートがないため作成しませんでした。"
             )
-    else:
-        listLines.append("作成した週間店舗対応表: " + str(objMappingOutputPath))
+            if pszWorksheetName in dictMappingBackupPaths:
+                listLines.append(
+                    "旧対応表の変更前パス: " + str(objMappingOutputPath)
+                )
+                listLines.append(
+                    "旧対応表のバックアップパス: "
+                    + str(dictMappingBackupPaths[pszWorksheetName])
+                )
+        else:
+            listLines.append("作成予定の対応表: " + str(objMappingOutputPath))
     return "\n".join(listLines) + "\n"
 
 
@@ -574,9 +656,12 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         pszWorksheetName: get_output_file_path(pszValidatedPath, pszWorksheetName)
         for pszWorksheetName in TARGET_WORKSHEET_NAMES
     }
-    objMappingOutputPath: Path = get_area_store_mapping_output_path(
-        dictOutputPaths["本州マグロ(週間)"]
-    )
+    dictMappingOutputPaths: dict[str, Path] = {
+        "割り": get_allocation_mapping_output_path(dictOutputPaths["割り"]),
+        "本州マグロ(週間)": get_area_store_mapping_output_path(
+            dictOutputPaths["本州マグロ(週間)"]
+        ),
+    }
     dictBackupPaths: dict[str, Path] = {}
     for pszWorksheetName in listMissingWorksheetNames:
         objMissingOutputPath: Path = dictOutputPaths[pszWorksheetName]
@@ -584,12 +669,13 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             dictBackupPaths[pszWorksheetName] = get_next_backup_path(
                 objMissingOutputPath
             )
-    objMappingBackupPath: Path | None = None
-    if (
-        "本州マグロ(週間)" in listMissingWorksheetNames
-        and objMappingOutputPath.exists()
-    ):
-        objMappingBackupPath = get_next_backup_path(objMappingOutputPath)
+    dictMappingBackupPaths: dict[str, Path] = {}
+    for pszWorksheetName in listMissingWorksheetNames:
+        objMappingOutputPath: Path = dictMappingOutputPaths[pszWorksheetName]
+        if objMappingOutputPath.exists():
+            dictMappingBackupPaths[pszWorksheetName] = get_next_backup_path(
+                objMappingOutputPath
+            )
     dictTemporaryPaths: dict[Path, Path] = {}
     objWarningPath: Path = Path(get_warning_file_full_path(pszValidatedPath))
     objTemporaryWarningPath: Path | None = None
@@ -608,16 +694,20 @@ def process_input_file(pszInputFileFullPath: str) -> None:
                     listMissingWorksheetNames,
                     dictOutputPaths,
                     dictBackupPaths,
-                    objMappingOutputPath,
-                    objMappingBackupPath,
+                    dictMappingOutputPaths,
+                    dictMappingBackupPaths,
                 ),
             )
         dictMissingOutputBackups: dict[Path, Path] = {
             dictOutputPaths[pszWorksheetName]: objBackupPath
             for pszWorksheetName, objBackupPath in dictBackupPaths.items()
         }
-        if objMappingBackupPath is not None:
-            dictMissingOutputBackups[objMappingOutputPath] = objMappingBackupPath
+        for pszWorksheetName, objMappingBackupPath in (
+            dictMappingBackupPaths.items()
+        ):
+            dictMissingOutputBackups[
+                dictMappingOutputPaths[pszWorksheetName]
+            ] = objMappingBackupPath
         replace_output_files(
             dictTemporaryPaths,
             dictMissingOutputBackups,
@@ -635,10 +725,46 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             "対象シートが見つかりません。対象シート = "
             + ", ".join(TARGET_WORKSHEET_NAMES)
         )
+    objCreatedAllocationMappingPath: Path | None = None
+    iAllocationMappingRowCount: int = 0
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
     iMappingCenterCount: int = 0
     iMappingGroupCount: int = 0
+    listMappingResultLines: list[str] = []
+    listMappingErrorLines: list[str] = []
+    if "割り" in dictWorksheetResults:
+        try:
+            (
+                objCreatedAllocationMappingPath,
+                iAllocationMappingRowCount,
+            ) = process_allocation_mapping_file(dictOutputPaths["割り"])
+            listMappingResultLines.append(
+                "処理A（割り対応表）: 成功\n出力ファイル: "
+                + str(objCreatedAllocationMappingPath)
+            )
+        except Exception as objException:
+            try:
+                objBackupPath = rename_output_to_backup(
+                    dictMappingOutputPaths["割り"]
+                )
+                pszBackupDetail: str = (
+                    ""
+                    if objBackupPath is None
+                    else "\n旧出力バックアップ: " + str(objBackupPath)
+                )
+            except Exception as objBackupException:
+                pszBackupDetail = (
+                    "\n旧出力のバックアップにも失敗しました。Detail = "
+                    + str(objBackupException)
+                )
+            listMappingErrorLines.append(
+                "処理A（割り対応表）: エラー\nエラー内容: "
+                + str(objException)
+                + pszBackupDetail
+            )
+    else:
+        listMappingResultLines.append("処理A（割り対応表）: スキップ")
     if "本州マグロ(週間)" in dictWorksheetResults:
         try:
             (
@@ -649,9 +775,36 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             ) = process_area_store_mapping_file(
                 dictOutputPaths["本州マグロ(週間)"]
             )
-        except Exception:
-            rename_output_to_backup(objMappingOutputPath)
-            raise
+            listMappingResultLines.append(
+                "処理B（週間配送センター対応表）: 成功\n出力ファイル: "
+                + str(objCreatedMappingPath)
+            )
+        except Exception as objException:
+            try:
+                objBackupPath = rename_output_to_backup(
+                    dictMappingOutputPaths["本州マグロ(週間)"]
+                )
+                pszBackupDetail = (
+                    ""
+                    if objBackupPath is None
+                    else "\n旧出力バックアップ: " + str(objBackupPath)
+                )
+            except Exception as objBackupException:
+                pszBackupDetail = (
+                    "\n旧出力のバックアップにも失敗しました。Detail = "
+                    + str(objBackupException)
+                )
+            listMappingErrorLines.append(
+                "処理B（週間配送センター対応表）: エラー\nエラー内容: "
+                + str(objException)
+                + pszBackupDetail
+            )
+    else:
+        listMappingResultLines.append("処理B（週間配送センター対応表）: スキップ")
+    if listMappingErrorLines:
+        raise ValueError(
+            "\n\n".join(listMappingErrorLines + listMappingResultLines)
+        )
     remove_old_error_file(pszValidatedPath)
     print("朝日注文エリア店舗対応調査用TSVファイルを作成しました。")
     print("Input: " + pszValidatedPath)
@@ -678,6 +831,17 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         print("Weekly Area Store Mapping Rows: " + str(iMappingRowCount))
         print("Weekly Area Store Mapping Centers: " + str(iMappingCenterCount))
         print("Weekly Area Store Mapping Groups: " + str(iMappingGroupCount))
+    if objCreatedAllocationMappingPath is not None:
+        print("Allocation Area Store Mapping Result: Success")
+        print("Allocation Area Store Mapping Input: " + str(dictOutputPaths["割り"]))
+        print(
+            "Allocation Area Store Mapping TSV: "
+            + str(objCreatedAllocationMappingPath)
+        )
+        print(
+            "Allocation Area Store Mapping Rows: "
+            + str(iAllocationMappingRowCount)
+        )
 
 
 def main() -> int:
