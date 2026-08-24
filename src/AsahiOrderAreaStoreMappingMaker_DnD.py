@@ -8,8 +8,10 @@
 ###############################################################
 
 import os
+import re
 import subprocess
 import sys
+import tempfile
 
 import win32api
 import win32con
@@ -19,6 +21,10 @@ from AsahiOrderAreaStoreMappingMaker_Cmd import report_processing_error
 
 
 WINDOW_TITLE: str = "Asahi Order Area Store Mapping Maker (Drag & Drop)"
+MAX_RESULT_BACKUP_NUMBER: int = 9999
+FINAL_ALLOCATION_OUTPUT_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0005.tsv"
+)
 
 
 def show_message_box(pszMessage: str, pszTitle: str) -> None:
@@ -31,6 +37,134 @@ def show_message_box(pszMessage: str, pszTitle: str) -> None:
 def show_error_message_box(pszMessage: str, pszTitle: str) -> None:
     """エラー内容をエラーアイコン付きメッセージボックスで表示します。"""
     win32gui.MessageBox(0, pszMessage, pszTitle, win32con.MB_OK | win32con.MB_ICONERROR)
+
+
+def show_warning_message_box(pszMessage: str, pszTitle: str) -> None:
+    """警告内容を警告アイコン付きメッセージボックスで表示します。"""
+    win32gui.MessageBox(0, pszMessage, pszTitle, win32con.MB_OK | win32con.MB_ICONWARNING)
+
+
+def get_result_file_full_path(pszInputFileFullPath: str) -> str:
+    """入力Excelと同じフォルダーの<入力Excel名>_result.txtを返します。"""
+    pszDirectoryFullPath: str = os.path.dirname(os.path.abspath(pszInputFileFullPath))
+    pszBaseNameWithoutExtension: str = os.path.splitext(
+        os.path.basename(pszInputFileFullPath)
+    )[0]
+    return os.path.join(
+        pszDirectoryFullPath, pszBaseNameWithoutExtension + "_result.txt"
+    )
+
+
+def get_next_result_backup_full_path(pszResultFileFullPath: str) -> str:
+    """既存結果テキストに対応する次の.bk0001.txt形式のパスを返します。"""
+    pszDirectoryFullPath: str = os.path.dirname(pszResultFileFullPath)
+    pszResultFileName: str = os.path.basename(pszResultFileFullPath)
+    objPattern: re.Pattern[str] = re.compile(
+        r"^" + re.escape(pszResultFileName) + r"\.bk([0-9]{4})\.txt$"
+    )
+    listBackupNumbers: list[int] = []
+    for pszCandidateFileName in os.listdir(pszDirectoryFullPath):
+        objMatch: re.Match[str] | None = objPattern.fullmatch(pszCandidateFileName)
+        if objMatch is None:
+            continue
+        pszCandidateFullPath: str = os.path.join(
+            pszDirectoryFullPath, pszCandidateFileName
+        )
+        if not os.path.isfile(pszCandidateFullPath):
+            continue
+        iBackupNumber: int = int(objMatch.group(1))
+        if 1 <= iBackupNumber <= MAX_RESULT_BACKUP_NUMBER:
+            listBackupNumbers.append(iBackupNumber)
+    iNextBackupNumber: int = (
+        1 if not listBackupNumbers else max(listBackupNumbers) + 1
+    )
+    if iNextBackupNumber > MAX_RESULT_BACKUP_NUMBER:
+        raise ValueError(
+            "結果テキストのバックアップ番号が最大値9999に到達しています。Path = "
+            + pszResultFileFullPath
+        )
+    return pszResultFileFullPath + f".bk{iNextBackupNumber:04d}.txt"
+
+
+def save_result_text(
+    pszInputFileFullPath: str, pszResultText: str
+) -> tuple[str, str | None]:
+    """詳細結果をUTF-8で安全に保存し、既存結果があれば連番バックアップします。"""
+    pszResultFileFullPath: str = get_result_file_full_path(pszInputFileFullPath)
+    pszNormalizedResultText: str = pszResultText.rstrip("\r\n") + "\n"
+    iFileDescriptor, pszTemporaryFileFullPath = tempfile.mkstemp(
+        prefix=os.path.basename(pszResultFileFullPath) + "_",
+        suffix=".txt",
+        dir=os.path.dirname(pszResultFileFullPath),
+    )
+    os.close(iFileDescriptor)
+    pszBackupFileFullPath: str | None = None
+    bBackupCreated: bool = False
+    try:
+        with open(
+            pszTemporaryFileFullPath, mode="w", encoding="utf-8", newline=""
+        ) as objFile:
+            objFile.write(pszNormalizedResultText)
+        with open(
+            pszTemporaryFileFullPath, mode="r", encoding="utf-8", newline=""
+        ) as objFile:
+            if objFile.read() != pszNormalizedResultText:
+                raise ValueError("詳細結果テキストの保存後検証に失敗しました。")
+        if os.path.exists(pszResultFileFullPath):
+            if not os.path.isfile(pszResultFileFullPath):
+                raise ValueError(
+                    "詳細結果の出力先がファイルではありません。Path = "
+                    + pszResultFileFullPath
+                )
+            pszBackupFileFullPath = get_next_result_backup_full_path(
+                pszResultFileFullPath
+            )
+            os.rename(pszResultFileFullPath, pszBackupFileFullPath)
+            bBackupCreated = True
+        os.replace(pszTemporaryFileFullPath, pszResultFileFullPath)
+    except Exception:
+        if bBackupCreated and pszBackupFileFullPath is not None:
+            if os.path.exists(pszResultFileFullPath):
+                os.remove(pszResultFileFullPath)
+            if os.path.exists(pszBackupFileFullPath):
+                os.rename(pszBackupFileFullPath, pszResultFileFullPath)
+        raise
+    finally:
+        if os.path.exists(pszTemporaryFileFullPath):
+            os.remove(pszTemporaryFileFullPath)
+    return pszResultFileFullPath, pszBackupFileFullPath
+
+
+def build_success_summary_message(
+    pszInputFileFullPath: str, pszResultFileFullPath: str
+) -> str:
+    """正常終了MessageBox用の短い要約を返します。"""
+    return (
+        "朝日注文エリア店舗対応TSVの作成が正常に完了しました。\n\n"
+        + "入力ファイル:\n"
+        + os.path.basename(pszInputFileFullPath)
+        + "\n\n最終出力:\n"
+        + FINAL_ALLOCATION_OUTPUT_FILE_NAME
+        + "\n\n詳細結果:\n"
+        + os.path.basename(pszResultFileFullPath)
+        + "\n\n各ファイルは入力ファイルと同じフォルダーに保存しました。"
+    )
+
+
+def build_result_save_warning_message(
+    pszInputFileFullPath: str, objException: Exception
+) -> str:
+    """TSV成功・詳細結果保存失敗時の短い警告文を返します。"""
+    return (
+        "朝日注文エリア店舗対応TSVの作成は正常に完了しました。\n\n"
+        + "ただし、詳細結果テキストを保存できませんでした。\n\n"
+        + "入力ファイル:\n"
+        + os.path.basename(pszInputFileFullPath)
+        + "\n\n最終出力:\n"
+        + FINAL_ALLOCATION_OUTPUT_FILE_NAME
+        + "\n\n詳細結果保存エラー:\n"
+        + str(objException).splitlines()[0]
+    )
 
 
 def run_asahi_order_area_store_mapping_maker_cmd(
@@ -171,7 +305,23 @@ def window_proc(
                 run_asahi_order_area_store_mapping_maker_cmd(pszDroppedFilePath)
             )
             if bIsSuccess:
-                show_message_box(pszResultMessage, WINDOW_TITLE)
+                try:
+                    pszResultFileFullPath, _ = save_result_text(
+                        pszDroppedFilePath, pszResultMessage
+                    )
+                    show_message_box(
+                        build_success_summary_message(
+                            pszDroppedFilePath, pszResultFileFullPath
+                        ),
+                        WINDOW_TITLE,
+                    )
+                except Exception as objException:
+                    show_warning_message_box(
+                        build_result_save_warning_message(
+                            pszDroppedFilePath, objException
+                        ),
+                        WINDOW_TITLE,
+                    )
             else:
                 show_error_message_box(pszResultMessage, WINDOW_TITLE)
         finally:
