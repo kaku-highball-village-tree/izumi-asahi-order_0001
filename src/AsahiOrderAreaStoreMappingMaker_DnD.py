@@ -105,6 +105,7 @@ def draw_instruction_text(iWindowHandle: int) -> None:
         "正式店舗名.txtは必須で、正式名を反映したstep0002 TSVを作成します。\n"
         "正式店舗名.txtがない場合はstep0002_error.txtを作成します。\n"
         "step0002からAPEXの2列を除いたstep0003 TSVを作成します。\n"
+        "週間店舗対応表から配送センター名を付けたstep0004 TSVを作成します。\n"
         "「本州マグロ(週間)」から週間店舗対応表も作成します。\n"
         "対象シートがない場合は_warning.txtを出力します。\n"
         "存在しないシートの旧TSVは.bk0001.tsv形式へ名前変更します。\n"
@@ -206,7 +207,7 @@ def create_main_window(pszWindowClassName: str, pszWindowTitle: str) -> int:
         | win32con.WS_SYSMENU
         | win32con.WS_MINIMIZEBOX
     )
-    iWindowHeight: int = 380
+    iWindowHeight: int = 420
     iWindowWidth: int = int(iWindowHeight * 1.618)
     iWindowHandle: int = win32gui.CreateWindowEx(
         win32con.WS_EX_ACCEPTFILES,
