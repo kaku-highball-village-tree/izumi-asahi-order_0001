@@ -37,6 +37,39 @@ ALLOCATION_MAPPING_HEADERS: tuple[str, str, str, str, str] = (
     "APEX店舗コード",
     "APEX店舗名",
 )
+ALLOCATION_STORE_CODE_MISMATCH_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_店舗コード不一致.tsv"
+)
+ALLOCATION_STORE_NAME_MISMATCH_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_店舗名不一致.tsv"
+)
+ALLOCATION_FORMAL_STORE_NAME_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_正式店舗名.txt"
+)
+ALLOCATION_STEP0002_FILE_NAME: str = "AsahiOrderAreaStoreMapping_割り_step0002.tsv"
+ALLOCATION_STEP0002_ERROR_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_error.txt"
+)
+ALLOCATION_FORMAL_STORE_NAME_HEADERS: tuple[str, str] = ("店舗コード", "店舗略称")
+ALLOCATION_STEP0003_FILE_NAME: str = "AsahiOrderAreaStoreMapping_割り_step0003.tsv"
+ALLOCATION_STEP0003_ERROR_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0003_error.txt"
+)
+ALLOCATION_STEP0003_HEADERS: tuple[str, str, str] = (
+    "エリア名",
+    "店舗コード",
+    "店舗略称",
+)
+ALLOCATION_STEP0004_FILE_NAME: str = "AsahiOrderAreaStoreMapping_割り_step0004.tsv"
+ALLOCATION_STEP0004_ERROR_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0004_error.txt"
+)
+ALLOCATION_STEP0004_HEADERS: tuple[str, str, str, str] = (
+    "配送センター名",
+    "エリア名",
+    "店舗コード",
+    "店舗略称",
+)
 CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
@@ -285,6 +318,576 @@ def process_allocation_mapping_file(objInputTsvPath: Path) -> tuple[Path, int]:
         if objTemporaryPath.exists():
             objTemporaryPath.unlink()
     return objOutputPath, len(listMappingRows)
+
+
+def get_allocation_mismatch_output_paths(
+    objStep0001Path: Path,
+) -> tuple[Path, Path]:
+    """割りstep0001と同じフォルダーに作る2種類の不一致TSVパスを返します。"""
+    return (
+        objStep0001Path.with_name(ALLOCATION_STORE_CODE_MISMATCH_FILE_NAME),
+        objStep0001Path.with_name(ALLOCATION_STORE_NAME_MISMATCH_FILE_NAME),
+    )
+
+
+def build_allocation_mismatch_rows(
+    listRows: list[list[str]],
+) -> tuple[list[list[str]], list[list[str]]]:
+    """割りstep0001を検証し、店舗コード不一致行と店舗名不一致行を返します。"""
+    if not listRows:
+        raise ValueError("割りstep0001 TSVが空です。")
+    if tuple(listRows[0]) != ALLOCATION_MAPPING_HEADERS:
+        raise ValueError(
+            "割りstep0001 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_MAPPING_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listRows[0])
+        )
+    listStoreCodeMismatchRows: list[list[str]] = []
+    listStoreNameMismatchRows: list[list[str]] = []
+    for iRowNumber, listValues in enumerate(listRows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_MAPPING_HEADERS):
+            raise ValueError(
+                "割りstep0001 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = "
+                + str(len(ALLOCATION_MAPPING_HEADERS))
+                + "、実際の列数 = "
+                + str(len(listValues))
+            )
+        if listValues[1] != listValues[3]:
+            listStoreCodeMismatchRows.append(listValues)
+        elif listValues[2] != listValues[4]:
+            listStoreNameMismatchRows.append(listValues)
+    return listStoreCodeMismatchRows, listStoreNameMismatchRows
+
+
+def replace_allocation_mismatch_files(
+    dictTemporaryPaths: dict[Path, Path], dictBackupPaths: dict[Path, Path]
+) -> None:
+    """2種類の不一致TSVを一括置換し、失敗時は処理前の状態へ戻します。"""
+    listRenamedOutputs: list[tuple[Path, Path]] = []
+    listReplacedOutputs: list[Path] = []
+    try:
+        for objOutputPath, objBackupPath in dictBackupPaths.items():
+            if objBackupPath.exists():
+                raise FileExistsError(
+                    "バックアップ先がすでに存在します。Path = " + str(objBackupPath)
+                )
+            os.rename(objOutputPath, objBackupPath)
+            listRenamedOutputs.append((objOutputPath, objBackupPath))
+        for objOutputPath, objTemporaryPath in dictTemporaryPaths.items():
+            os.replace(objTemporaryPath, objOutputPath)
+            listReplacedOutputs.append(objOutputPath)
+    except Exception:
+        for objOutputPath in reversed(listReplacedOutputs):
+            if objOutputPath.exists():
+                objOutputPath.unlink()
+        for objOutputPath, objBackupPath in reversed(listRenamedOutputs):
+            if objBackupPath.exists():
+                os.rename(objBackupPath, objOutputPath)
+        raise
+
+
+def process_allocation_mismatch_files(
+    objStep0001Path: Path,
+) -> tuple[Path, int, Path, int, dict[Path, Path]]:
+    """割りstep0001から2種類の不一致TSVを作成します。"""
+    if not objStep0001Path.exists() or not objStep0001Path.is_file():
+        raise ValueError(
+            "割りstep0001 TSVが見つかりません。Path = " + str(objStep0001Path)
+        )
+    listRows: list[list[str]] = read_tsv_rows(objStep0001Path)
+    listStoreCodeMismatchRows, listStoreNameMismatchRows = (
+        build_allocation_mismatch_rows(listRows)
+    )
+    objStoreCodeMismatchPath, objStoreNameMismatchPath = (
+        get_allocation_mismatch_output_paths(objStep0001Path)
+    )
+    dictOutputRows: dict[Path, list[list[str]]] = {
+        objStoreCodeMismatchPath: listStoreCodeMismatchRows,
+        objStoreNameMismatchPath: listStoreNameMismatchRows,
+    }
+    dictBackupPaths: dict[Path, Path] = {
+        objOutputPath: get_next_backup_path(objOutputPath)
+        for objOutputPath in dictOutputRows
+        if objOutputPath.exists()
+    }
+    dictTemporaryPaths: dict[Path, Path] = {}
+    try:
+        for objOutputPath, listMismatchRows in dictOutputRows.items():
+            objTemporaryPath: Path = create_temporary_path(objOutputPath)
+            dictTemporaryPaths[objOutputPath] = objTemporaryPath
+            save_tsv_rows(
+                objTemporaryPath,
+                [list(ALLOCATION_MAPPING_HEADERS)] + listMismatchRows,
+            )
+        replace_allocation_mismatch_files(dictTemporaryPaths, dictBackupPaths)
+    finally:
+        for objTemporaryPath in dictTemporaryPaths.values():
+            if objTemporaryPath.exists():
+                objTemporaryPath.unlink()
+    return (
+        objStoreCodeMismatchPath,
+        len(listStoreCodeMismatchRows),
+        objStoreNameMismatchPath,
+        len(listStoreNameMismatchRows),
+        dictBackupPaths,
+    )
+
+
+def get_allocation_formal_store_name_paths(
+    objStep0001Path: Path,
+) -> tuple[Path, Path, Path]:
+    """正式店舗名入力、最終step0002出力、専用エラーの各パスを返します。"""
+    return (
+        objStep0001Path.with_name(ALLOCATION_FORMAL_STORE_NAME_FILE_NAME),
+        objStep0001Path.with_name(ALLOCATION_STEP0002_FILE_NAME),
+        objStep0001Path.with_name(ALLOCATION_STEP0002_ERROR_FILE_NAME),
+    )
+
+
+def build_allocation_step0002_rows(
+    listStep0001Rows: list[list[str]], listFormalStoreNameRows: list[list[str]]
+) -> tuple[list[list[str]], int, int]:
+    """step0001全店舗を維持し、指定店舗の店舗略称だけを正式名へ変更します。"""
+    if not listStep0001Rows:
+        raise ValueError("割りstep0001 TSVが空です。")
+    if tuple(listStep0001Rows[0]) != ALLOCATION_MAPPING_HEADERS:
+        raise ValueError(
+            "割りstep0001 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_MAPPING_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listStep0001Rows[0])
+        )
+    if not listFormalStoreNameRows:
+        raise ValueError("正式店舗名ファイルが空です。")
+    if tuple(listFormalStoreNameRows[0]) != ALLOCATION_FORMAL_STORE_NAME_HEADERS:
+        raise ValueError(
+            "正式店舗名ファイルの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_FORMAL_STORE_NAME_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listFormalStoreNameRows[0])
+        )
+
+    dictFormalStoreNames: dict[str, tuple[str, int]] = {}
+    for iRowNumber, listValues in enumerate(listFormalStoreNameRows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_FORMAL_STORE_NAME_HEADERS):
+            raise ValueError(
+                "正式店舗名ファイルのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 2、実際の列数 = "
+                + str(len(listValues))
+            )
+        pszStoreCode, pszFormalStoreName = listValues
+        if pszStoreCode == "" or pszFormalStoreName == "":
+            raise ValueError(
+                "正式店舗名ファイルに空の店舗コードまたは店舗略称があります。行 = "
+                + str(iRowNumber)
+            )
+        if pszStoreCode in dictFormalStoreNames:
+            raise ValueError(
+                "正式店舗名ファイルに店舗コードの重複があります。店舗コード = "
+                + pszStoreCode
+                + "、行 = "
+                + str(dictFormalStoreNames[pszStoreCode][1])
+                + ", "
+                + str(iRowNumber)
+            )
+        dictFormalStoreNames[pszStoreCode] = (pszFormalStoreName, iRowNumber)
+
+    dictStep0001StoreCounts: dict[str, int] = {}
+    listOutputRows: list[list[str]] = [list(ALLOCATION_MAPPING_HEADERS)]
+    iChangedRowCount: int = 0
+    for iRowNumber, listValues in enumerate(listStep0001Rows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_MAPPING_HEADERS):
+            raise ValueError(
+                "割りstep0001 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 5、実際の列数 = "
+                + str(len(listValues))
+            )
+        pszStoreCode: str = listValues[1]
+        if pszStoreCode in dictFormalStoreNames:
+            dictStep0001StoreCounts[pszStoreCode] = (
+                dictStep0001StoreCounts.get(pszStoreCode, 0) + 1
+            )
+            pszFormalStoreName: str = dictFormalStoreNames[pszStoreCode][0]
+            listOutputRow: list[str] = listValues.copy()
+            if listOutputRow[2] != pszFormalStoreName:
+                listOutputRow[2] = pszFormalStoreName
+                iChangedRowCount += 1
+            listOutputRows.append(listOutputRow)
+        else:
+            listOutputRows.append(listValues.copy())
+
+    for pszStoreCode, (_, iFormalRowNumber) in dictFormalStoreNames.items():
+        iMatchCount: int = dictStep0001StoreCounts.get(pszStoreCode, 0)
+        if iMatchCount == 0:
+            raise ValueError(
+                "正式店舗名の店舗コードが割りstep0001 TSVに見つかりません。店舗コード = "
+                + pszStoreCode
+                + "、正式店舗名ファイル行 = "
+                + str(iFormalRowNumber)
+            )
+        if iMatchCount > 1:
+            raise ValueError(
+                "正式店舗名の店舗コードが割りstep0001 TSVに複数あります。店舗コード = "
+                + pszStoreCode
+                + "、件数 = "
+                + str(iMatchCount)
+            )
+    return listOutputRows, len(dictFormalStoreNames), iChangedRowCount
+
+
+def replace_allocation_step0002_file(
+    objOutputPath: Path, objTemporaryPath: Path, objBackupPath: Path | None
+) -> None:
+    """最終step0002を置換し、失敗時は既存出力を復元します。"""
+    bBackupCreated: bool = False
+    try:
+        if objBackupPath is not None:
+            if objBackupPath.exists():
+                raise FileExistsError(
+                    "バックアップ先がすでに存在します。Path = " + str(objBackupPath)
+                )
+            os.rename(objOutputPath, objBackupPath)
+            bBackupCreated = True
+        os.replace(objTemporaryPath, objOutputPath)
+    except Exception:
+        if bBackupCreated and objBackupPath is not None and objBackupPath.exists():
+            if objOutputPath.exists():
+                objOutputPath.unlink()
+            os.rename(objBackupPath, objOutputPath)
+        raise
+
+
+def process_allocation_formal_store_names(
+    objStep0001Path: Path,
+) -> tuple[Path, Path, int, int, int, Path | None]:
+    """正式店舗名をstep0001全店舗へ反映し、最終step0002を作成します。"""
+    objFormalStoreNamePath, objOutputPath, _ = get_allocation_formal_store_name_paths(
+        objStep0001Path
+    )
+    if not objStep0001Path.exists() or not objStep0001Path.is_file():
+        raise ValueError(
+            "割りstep0001 TSVが見つかりません。Path = " + str(objStep0001Path)
+        )
+    if not objFormalStoreNamePath.exists() or not objFormalStoreNamePath.is_file():
+        raise ValueError(
+            "正式店舗名ファイルが見つかりません。Path = "
+            + str(objFormalStoreNamePath)
+        )
+    listStep0001Rows: list[list[str]] = read_tsv_rows(objStep0001Path)
+    listFormalStoreNameRows: list[list[str]] = read_tsv_rows(objFormalStoreNamePath)
+    listOutputRows, iFormalStoreNameCount, iChangedRowCount = (
+        build_allocation_step0002_rows(listStep0001Rows, listFormalStoreNameRows)
+    )
+    objBackupPath: Path | None = (
+        get_next_backup_path(objOutputPath) if objOutputPath.exists() else None
+    )
+    objTemporaryPath: Path = create_temporary_path(objOutputPath)
+    try:
+        save_tsv_rows(objTemporaryPath, listOutputRows)
+        if read_tsv_rows(objTemporaryPath) != listOutputRows:
+            raise ValueError("割りstep0002 TSVの保存後検証に失敗しました。")
+        replace_allocation_step0002_file(
+            objOutputPath, objTemporaryPath, objBackupPath
+        )
+    finally:
+        if objTemporaryPath.exists():
+            objTemporaryPath.unlink()
+    return (
+        objFormalStoreNamePath,
+        objOutputPath,
+        len(listOutputRows) - 1,
+        iFormalStoreNameCount,
+        iChangedRowCount,
+        objBackupPath,
+    )
+
+
+def report_allocation_step0002_error(
+    objStep0001Path: Path, objFormalStoreNamePath: Path, pszDetailMessage: str
+) -> Path:
+    """処理Aのエラーを標準エラーとstep0002専用エラーファイルへ出力します。"""
+    _, _, objErrorPath = get_allocation_formal_store_name_paths(objStep0001Path)
+    pszErrorMessage: str = (
+        "処理結果: エラー\n"
+        + "入力ファイル: "
+        + str(objFormalStoreNamePath)
+        + "\n発生した処理: 割り正式店舗名反映処理\nエラー内容: "
+        + pszDetailMessage
+        + "\n"
+    )
+    print(pszErrorMessage, file=sys.stderr, end="")
+    write_error_text(str(objErrorPath), pszErrorMessage)
+    return objErrorPath
+
+
+def get_allocation_step0003_paths(objStep0002Path: Path) -> tuple[Path, Path]:
+    """最終step0003出力と専用エラーの各パスを返します。"""
+    return (
+        objStep0002Path.with_name(ALLOCATION_STEP0003_FILE_NAME),
+        objStep0002Path.with_name(ALLOCATION_STEP0003_ERROR_FILE_NAME),
+    )
+
+
+def build_allocation_step0003_rows(
+    listStep0002Rows: list[list[str]],
+) -> tuple[list[list[str]], int]:
+    """step0002を検証し、APEXの2列を除いた3列の全店舗行を返します。"""
+    if not listStep0002Rows:
+        raise ValueError("割りstep0002 TSVが空です。")
+    if tuple(listStep0002Rows[0]) != ALLOCATION_MAPPING_HEADERS:
+        raise ValueError(
+            "割りstep0002 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_MAPPING_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listStep0002Rows[0])
+        )
+    listOutputRows: list[list[str]] = [list(ALLOCATION_STEP0003_HEADERS)]
+    iInputDataRowCount: int = 0
+    for iRowNumber, listValues in enumerate(listStep0002Rows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_MAPPING_HEADERS):
+            raise ValueError(
+                "割りstep0002 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 5、実際の列数 = "
+                + str(len(listValues))
+            )
+        listOutputRows.append(listValues[:3])
+        iInputDataRowCount += 1
+    if len(listOutputRows) - 1 != iInputDataRowCount:
+        raise ValueError(
+            "割りstep0002とstep0003のデータ行数が一致しません。入力行数 = "
+            + str(iInputDataRowCount)
+            + "、出力行数 = "
+            + str(len(listOutputRows) - 1)
+        )
+    return listOutputRows, iInputDataRowCount
+
+
+def process_allocation_step0003_file(
+    objStep0002Path: Path,
+) -> tuple[Path, int, int, Path | None]:
+    """step0002を再読込し、APEXの2列を除いたstep0003を作成します。"""
+    if not objStep0002Path.exists() or not objStep0002Path.is_file():
+        raise ValueError(
+            "割りstep0002 TSVが見つかりません。Path = " + str(objStep0002Path)
+        )
+    listStep0002Rows: list[list[str]] = read_tsv_rows(objStep0002Path)
+    listOutputRows, iInputDataRowCount = build_allocation_step0003_rows(
+        listStep0002Rows
+    )
+    objOutputPath, _ = get_allocation_step0003_paths(objStep0002Path)
+    objBackupPath: Path | None = (
+        get_next_backup_path(objOutputPath) if objOutputPath.exists() else None
+    )
+    objTemporaryPath: Path = create_temporary_path(objOutputPath)
+    try:
+        save_tsv_rows(objTemporaryPath, listOutputRows)
+        if read_tsv_rows(objTemporaryPath) != listOutputRows:
+            raise ValueError("割りstep0003 TSVの保存後検証に失敗しました。")
+        replace_allocation_step0002_file(
+            objOutputPath, objTemporaryPath, objBackupPath
+        )
+    finally:
+        if objTemporaryPath.exists():
+            objTemporaryPath.unlink()
+    return (
+        objOutputPath,
+        iInputDataRowCount,
+        len(listOutputRows) - 1,
+        objBackupPath,
+    )
+
+
+def report_allocation_step0003_error(
+    objStep0002Path: Path, pszDetailMessage: str
+) -> Path:
+    """step0003作成エラーを標準エラーと専用エラーファイルへ出力します。"""
+    _, objErrorPath = get_allocation_step0003_paths(objStep0002Path)
+    pszErrorMessage: str = (
+        "処理結果: エラー\n"
+        + "入力ファイル: "
+        + str(objStep0002Path)
+        + "\n発生した処理: 割りstep0003作成処理\nエラー内容: "
+        + pszDetailMessage
+        + "\n"
+    )
+    print(pszErrorMessage, file=sys.stderr, end="")
+    write_error_text(str(objErrorPath), pszErrorMessage)
+    return objErrorPath
+
+
+def get_allocation_step0004_paths(objStep0003Path: Path) -> tuple[Path, Path]:
+    """割りstep0004出力と専用エラーの各パスを返します。"""
+    return (
+        objStep0003Path.with_name(ALLOCATION_STEP0004_FILE_NAME),
+        objStep0003Path.with_name(ALLOCATION_STEP0004_ERROR_FILE_NAME),
+    )
+
+
+def build_allocation_step0004_rows(
+    listWeeklyRows: list[list[str]], listAllocationStep0003Rows: list[list[str]]
+) -> tuple[list[list[str]], int, int]:
+    """週間店舗コードから配送センター名を取得し、割り全店舗の左端へ追加します。"""
+    if not listWeeklyRows:
+        raise ValueError("週間step0001 TSVが空です。")
+    if tuple(listWeeklyRows[0]) != AREA_STORE_MAPPING_HEADERS:
+        raise ValueError(
+            "週間step0001 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(AREA_STORE_MAPPING_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listWeeklyRows[0])
+        )
+    dictDistributionCenters: dict[str, str] = {}
+    for iRowNumber, listValues in enumerate(listWeeklyRows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(AREA_STORE_MAPPING_HEADERS):
+            raise ValueError(
+                "週間step0001 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 3、実際の列数 = "
+                + str(len(listValues))
+            )
+        pszDistributionCenterName, pszStoreCode, _ = listValues
+        if pszDistributionCenterName == "" or pszStoreCode == "":
+            raise ValueError(
+                "週間step0001 TSVに空の配送センター名または店舗コードがあります。行 = "
+                + str(iRowNumber)
+            )
+        pszExistingCenterName: str | None = dictDistributionCenters.get(pszStoreCode)
+        if (
+            pszExistingCenterName is not None
+            and pszExistingCenterName != pszDistributionCenterName
+        ):
+            raise ValueError(
+                "週間step0001 TSVの同じ店舗コードに異なる配送センター名があります。店舗コード = "
+                + pszStoreCode
+                + "、配送センター名 = "
+                + pszExistingCenterName
+                + ", "
+                + pszDistributionCenterName
+            )
+        dictDistributionCenters[pszStoreCode] = pszDistributionCenterName
+
+    if not listAllocationStep0003Rows:
+        raise ValueError("割りstep0003 TSVが空です。")
+    if tuple(listAllocationStep0003Rows[0]) != ALLOCATION_STEP0003_HEADERS:
+        raise ValueError(
+            "割りstep0003 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_STEP0003_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listAllocationStep0003Rows[0])
+        )
+    listOutputRows: list[list[str]] = [list(ALLOCATION_STEP0004_HEADERS)]
+    iMatchedRowCount: int = 0
+    iUnmatchedRowCount: int = 0
+    for iRowNumber, listValues in enumerate(
+        listAllocationStep0003Rows[1:], start=2
+    ):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_STEP0003_HEADERS):
+            raise ValueError(
+                "割りstep0003 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 3、実際の列数 = "
+                + str(len(listValues))
+            )
+        pszDistributionCenterName = dictDistributionCenters.get(listValues[1], "")
+        if pszDistributionCenterName == "":
+            iUnmatchedRowCount += 1
+        else:
+            iMatchedRowCount += 1
+        listOutputRows.append([pszDistributionCenterName] + listValues.copy())
+    if len(listOutputRows) - 1 != iMatchedRowCount + iUnmatchedRowCount:
+        raise ValueError(
+            "割りstep0003とstep0004のデータ行数が一致しません。入力行数 = "
+            + str(iMatchedRowCount + iUnmatchedRowCount)
+            + "、出力行数 = "
+            + str(len(listOutputRows) - 1)
+        )
+    return listOutputRows, iMatchedRowCount, iUnmatchedRowCount
+
+
+def process_allocation_step0004_file(
+    objWeeklyStep0001Path: Path, objAllocationStep0003Path: Path
+) -> tuple[Path, int, int, int, Path | None]:
+    """週間step0001と割りstep0003を再読込し、割りstep0004を作成します。"""
+    if not objWeeklyStep0001Path.exists() or not objWeeklyStep0001Path.is_file():
+        raise ValueError(
+            "週間step0001 TSVが見つかりません。Path = "
+            + str(objWeeklyStep0001Path)
+        )
+    if not objAllocationStep0003Path.exists() or not objAllocationStep0003Path.is_file():
+        raise ValueError(
+            "割りstep0003 TSVが見つかりません。Path = "
+            + str(objAllocationStep0003Path)
+        )
+    listWeeklyRows: list[list[str]] = read_tsv_rows(objWeeklyStep0001Path)
+    listAllocationStep0003Rows: list[list[str]] = read_tsv_rows(
+        objAllocationStep0003Path
+    )
+    listOutputRows, iMatchedRowCount, iUnmatchedRowCount = (
+        build_allocation_step0004_rows(
+            listWeeklyRows, listAllocationStep0003Rows
+        )
+    )
+    objOutputPath, _ = get_allocation_step0004_paths(objAllocationStep0003Path)
+    objBackupPath: Path | None = (
+        get_next_backup_path(objOutputPath) if objOutputPath.exists() else None
+    )
+    objTemporaryPath: Path = create_temporary_path(objOutputPath)
+    try:
+        save_tsv_rows(objTemporaryPath, listOutputRows)
+        if read_tsv_rows(objTemporaryPath) != listOutputRows:
+            raise ValueError("割りstep0004 TSVの保存後検証に失敗しました。")
+        replace_allocation_step0002_file(
+            objOutputPath, objTemporaryPath, objBackupPath
+        )
+    finally:
+        if objTemporaryPath.exists():
+            objTemporaryPath.unlink()
+    return (
+        objOutputPath,
+        len(listOutputRows) - 1,
+        iMatchedRowCount,
+        iUnmatchedRowCount,
+        objBackupPath,
+    )
+
+
+def report_allocation_step0004_error(
+    objWeeklyStep0001Path: Path,
+    objAllocationStep0003Path: Path,
+    pszDetailMessage: str,
+) -> Path:
+    """step0004作成エラーを標準エラーと専用エラーファイルへ出力します。"""
+    _, objErrorPath = get_allocation_step0004_paths(objAllocationStep0003Path)
+    pszErrorMessage: str = (
+        "処理結果: エラー\n週間入力ファイル: "
+        + str(objWeeklyStep0001Path)
+        + "\n割り入力ファイル: "
+        + str(objAllocationStep0003Path)
+        + "\n発生した処理: 割りstep0004作成処理\nエラー内容: "
+        + pszDetailMessage
+        + "\n"
+    )
+    print(pszErrorMessage, file=sys.stderr, end="")
+    write_error_text(str(objErrorPath), pszErrorMessage)
+    return objErrorPath
 
 
 def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
@@ -727,6 +1330,26 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         )
     objCreatedAllocationMappingPath: Path | None = None
     iAllocationMappingRowCount: int = 0
+    objStoreCodeMismatchPath: Path | None = None
+    iStoreCodeMismatchCount: int = 0
+    objStoreNameMismatchPath: Path | None = None
+    iStoreNameMismatchCount: int = 0
+    dictAllocationMismatchBackupPaths: dict[Path, Path] = {}
+    objFormalStoreNamePath: Path | None = None
+    objAllocationStep0002Path: Path | None = None
+    iAllocationStep0002RowCount: int = 0
+    iFormalStoreNameCount: int = 0
+    iFormalStoreNameChangedCount: int = 0
+    objAllocationStep0002BackupPath: Path | None = None
+    objAllocationStep0003Path: Path | None = None
+    iAllocationStep0003InputRowCount: int = 0
+    iAllocationStep0003OutputRowCount: int = 0
+    objAllocationStep0003BackupPath: Path | None = None
+    objAllocationStep0004Path: Path | None = None
+    iAllocationStep0004RowCount: int = 0
+    iAllocationStep0004MatchedRowCount: int = 0
+    iAllocationStep0004UnmatchedRowCount: int = 0
+    objAllocationStep0004BackupPath: Path | None = None
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
     iMappingCenterCount: int = 0
@@ -739,9 +1362,24 @@ def process_input_file(pszInputFileFullPath: str) -> None:
                 objCreatedAllocationMappingPath,
                 iAllocationMappingRowCount,
             ) = process_allocation_mapping_file(dictOutputPaths["割り"])
+            (
+                objStoreCodeMismatchPath,
+                iStoreCodeMismatchCount,
+                objStoreNameMismatchPath,
+                iStoreNameMismatchCount,
+                dictAllocationMismatchBackupPaths,
+            ) = process_allocation_mismatch_files(objCreatedAllocationMappingPath)
             listMappingResultLines.append(
                 "処理A（割り対応表）: 成功\n出力ファイル: "
                 + str(objCreatedAllocationMappingPath)
+                + "\n店舗コード不一致ファイル: "
+                + str(objStoreCodeMismatchPath)
+                + "\n店舗コード不一致件数: "
+                + str(iStoreCodeMismatchCount)
+                + "\n店舗名不一致ファイル: "
+                + str(objStoreNameMismatchPath)
+                + "\n店舗名不一致件数: "
+                + str(iStoreNameMismatchCount)
             )
         except Exception as objException:
             try:
@@ -765,6 +1403,93 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             )
     else:
         listMappingResultLines.append("処理A（割り対応表）: スキップ")
+    if (
+        objCreatedAllocationMappingPath is not None
+        and objStoreCodeMismatchPath is not None
+        and objStoreNameMismatchPath is not None
+    ):
+        try:
+            (
+                objFormalStoreNamePath,
+                objAllocationStep0002Path,
+                iAllocationStep0002RowCount,
+                iFormalStoreNameCount,
+                iFormalStoreNameChangedCount,
+                objAllocationStep0002BackupPath,
+            ) = process_allocation_formal_store_names(
+                objCreatedAllocationMappingPath
+            )
+            _, _, objStep0002ErrorPath = get_allocation_formal_store_name_paths(
+                objCreatedAllocationMappingPath
+            )
+            if objStep0002ErrorPath.exists():
+                objStep0002ErrorPath.unlink()
+            listMappingResultLines.append(
+                "処理C（割り正式店舗名反映）: 成功\n出力ファイル: "
+                + str(objAllocationStep0002Path)
+            )
+        except Exception as objException:
+            objFormalStoreNamePath, _, _ = get_allocation_formal_store_name_paths(
+                objCreatedAllocationMappingPath
+            )
+            try:
+                objStep0002ErrorPath = report_allocation_step0002_error(
+                    objCreatedAllocationMappingPath,
+                    objFormalStoreNamePath,
+                    str(objException),
+                )
+                pszErrorFileDetail: str = "\nエラーファイル: " + str(
+                    objStep0002ErrorPath
+                )
+            except Exception as objErrorFileException:
+                pszErrorFileDetail = (
+                    "\nstep0002_error.txtの保存にも失敗しました。Detail = "
+                    + str(objErrorFileException)
+                )
+            listMappingErrorLines.append(
+                "処理C（割り正式店舗名反映）: エラー\nエラー内容: "
+                + str(objException)
+                + pszErrorFileDetail
+            )
+    elif "割り" not in dictWorksheetResults:
+        listMappingResultLines.append("処理C（割り正式店舗名反映）: スキップ")
+    if objAllocationStep0002Path is not None:
+        try:
+            (
+                objAllocationStep0003Path,
+                iAllocationStep0003InputRowCount,
+                iAllocationStep0003OutputRowCount,
+                objAllocationStep0003BackupPath,
+            ) = process_allocation_step0003_file(objAllocationStep0002Path)
+            _, objStep0003ErrorPath = get_allocation_step0003_paths(
+                objAllocationStep0002Path
+            )
+            if objStep0003ErrorPath.exists():
+                objStep0003ErrorPath.unlink()
+            listMappingResultLines.append(
+                "処理D（割りstep0003作成）: 成功\n出力ファイル: "
+                + str(objAllocationStep0003Path)
+            )
+        except Exception as objException:
+            try:
+                objStep0003ErrorPath = report_allocation_step0003_error(
+                    objAllocationStep0002Path, str(objException)
+                )
+                pszErrorFileDetail = "\nエラーファイル: " + str(
+                    objStep0003ErrorPath
+                )
+            except Exception as objErrorFileException:
+                pszErrorFileDetail = (
+                    "\nstep0003_error.txtの保存にも失敗しました。Detail = "
+                    + str(objErrorFileException)
+                )
+            listMappingErrorLines.append(
+                "処理D（割りstep0003作成）: エラー\nエラー内容: "
+                + str(objException)
+                + pszErrorFileDetail
+            )
+    elif "割り" not in dictWorksheetResults:
+        listMappingResultLines.append("処理D（割りstep0003作成）: スキップ")
     if "本州マグロ(週間)" in dictWorksheetResults:
         try:
             (
@@ -801,6 +1526,75 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             )
     else:
         listMappingResultLines.append("処理B（週間配送センター対応表）: スキップ")
+    if objCreatedMappingPath is not None and objAllocationStep0003Path is not None:
+        try:
+            (
+                objAllocationStep0004Path,
+                iAllocationStep0004RowCount,
+                iAllocationStep0004MatchedRowCount,
+                iAllocationStep0004UnmatchedRowCount,
+                objAllocationStep0004BackupPath,
+            ) = process_allocation_step0004_file(
+                objCreatedMappingPath, objAllocationStep0003Path
+            )
+            _, objStep0004ErrorPath = get_allocation_step0004_paths(
+                objAllocationStep0003Path
+            )
+            if objStep0004ErrorPath.exists():
+                objStep0004ErrorPath.unlink()
+            listMappingResultLines.append(
+                "処理E（割りstep0004作成）: 成功\n出力ファイル: "
+                + str(objAllocationStep0004Path)
+            )
+        except Exception as objException:
+            try:
+                objStep0004ErrorPath = report_allocation_step0004_error(
+                    objCreatedMappingPath,
+                    objAllocationStep0003Path,
+                    str(objException),
+                )
+                pszErrorFileDetail = "\nエラーファイル: " + str(
+                    objStep0004ErrorPath
+                )
+            except Exception as objErrorFileException:
+                pszErrorFileDetail = (
+                    "\nstep0004_error.txtの保存にも失敗しました。Detail = "
+                    + str(objErrorFileException)
+                )
+            listMappingErrorLines.append(
+                "処理E（割りstep0004作成）: エラー\nエラー内容: "
+                + str(objException)
+                + pszErrorFileDetail
+            )
+    elif objAllocationStep0003Path is not None:
+        objExpectedWeeklyMappingPath: Path = dictMappingOutputPaths[
+            "本州マグロ(週間)"
+        ]
+        pszStep0004ErrorMessage: str = (
+            "今回の実行で週間step0001 TSVが作成されませんでした。Path = "
+            + str(objExpectedWeeklyMappingPath)
+        )
+        try:
+            objStep0004ErrorPath = report_allocation_step0004_error(
+                objExpectedWeeklyMappingPath,
+                objAllocationStep0003Path,
+                pszStep0004ErrorMessage,
+            )
+            pszErrorFileDetail = "\nエラーファイル: " + str(
+                objStep0004ErrorPath
+            )
+        except Exception as objErrorFileException:
+            pszErrorFileDetail = (
+                "\nstep0004_error.txtの保存にも失敗しました。Detail = "
+                + str(objErrorFileException)
+            )
+        listMappingErrorLines.append(
+            "処理E（割りstep0004作成）: エラー\nエラー内容: "
+            + pszStep0004ErrorMessage
+            + pszErrorFileDetail
+        )
+    else:
+        listMappingResultLines.append("処理E（割りstep0004作成）: スキップ")
     if listMappingErrorLines:
         raise ValueError(
             "\n\n".join(listMappingErrorLines + listMappingResultLines)
@@ -842,6 +1636,76 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             "Allocation Area Store Mapping Rows: "
             + str(iAllocationMappingRowCount)
         )
+    if objStoreCodeMismatchPath is not None and objStoreNameMismatchPath is not None:
+        print("Allocation Store Mismatch Result: Success")
+        print("Allocation Store Mismatch Input: " + str(objCreatedAllocationMappingPath))
+        print("Allocation Store Code Mismatch TSV: " + str(objStoreCodeMismatchPath))
+        print("Allocation Store Code Mismatch Rows: " + str(iStoreCodeMismatchCount))
+        print("Allocation Store Name Mismatch TSV: " + str(objStoreNameMismatchPath))
+        print("Allocation Store Name Mismatch Rows: " + str(iStoreNameMismatchCount))
+        for objOutputPath, objBackupPath in dictAllocationMismatchBackupPaths.items():
+            print("Allocation Store Mismatch Previous TSV: " + str(objOutputPath))
+            print("Allocation Store Mismatch Backup TSV: " + str(objBackupPath))
+    if objAllocationStep0002Path is not None and objFormalStoreNamePath is not None:
+        print("Allocation Formal Store Name Result: Success")
+        print("Allocation Formal Store Name Input: " + str(objFormalStoreNamePath))
+        print("Allocation Formal Store Name TSV: " + str(objAllocationStep0002Path))
+        print(
+            "Allocation Formal Store Name Rows: "
+            + str(iAllocationStep0002RowCount)
+        )
+        print(
+            "Allocation Formal Store Name Entries: " + str(iFormalStoreNameCount)
+        )
+        print(
+            "Allocation Formal Store Name Changed Rows: "
+            + str(iFormalStoreNameChangedCount)
+        )
+        if objAllocationStep0002BackupPath is not None:
+            print(
+                "Allocation Formal Store Name Backup TSV: "
+                + str(objAllocationStep0002BackupPath)
+            )
+    if objAllocationStep0003Path is not None:
+        print("Allocation Step0003 Result: Success")
+        print("Allocation Step0003 Input: " + str(objAllocationStep0002Path))
+        print("Allocation Step0003 TSV: " + str(objAllocationStep0003Path))
+        print(
+            "Allocation Step0003 Input Rows: "
+            + str(iAllocationStep0003InputRowCount)
+        )
+        print(
+            "Allocation Step0003 Output Rows: "
+            + str(iAllocationStep0003OutputRowCount)
+        )
+        print("Allocation Step0003 Removed Columns: APEX店舗コード, APEX店舗名")
+        if objAllocationStep0003BackupPath is not None:
+            print(
+                "Allocation Step0003 Backup TSV: "
+                + str(objAllocationStep0003BackupPath)
+            )
+    if objAllocationStep0004Path is not None:
+        print("Allocation Step0004 Result: Success")
+        print("Allocation Step0004 Weekly Input: " + str(objCreatedMappingPath))
+        print(
+            "Allocation Step0004 Allocation Input: "
+            + str(objAllocationStep0003Path)
+        )
+        print("Allocation Step0004 TSV: " + str(objAllocationStep0004Path))
+        print("Allocation Step0004 Rows: " + str(iAllocationStep0004RowCount))
+        print(
+            "Allocation Step0004 Center Matched Rows: "
+            + str(iAllocationStep0004MatchedRowCount)
+        )
+        print(
+            "Allocation Step0004 Center Unmatched Rows: "
+            + str(iAllocationStep0004UnmatchedRowCount)
+        )
+        if objAllocationStep0004BackupPath is not None:
+            print(
+                "Allocation Step0004 Backup TSV: "
+                + str(objAllocationStep0004BackupPath)
+            )
 
 
 def main() -> int:
