@@ -37,6 +37,12 @@ ALLOCATION_MAPPING_HEADERS: tuple[str, str, str, str, str] = (
     "APEX店舗コード",
     "APEX店舗名",
 )
+ALLOCATION_STORE_CODE_MISMATCH_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_店舗コード不一致.tsv"
+)
+ALLOCATION_STORE_NAME_MISMATCH_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0002_店舗名不一致.tsv"
+)
 CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
@@ -285,6 +291,124 @@ def process_allocation_mapping_file(objInputTsvPath: Path) -> tuple[Path, int]:
         if objTemporaryPath.exists():
             objTemporaryPath.unlink()
     return objOutputPath, len(listMappingRows)
+
+
+def get_allocation_mismatch_output_paths(
+    objStep0001Path: Path,
+) -> tuple[Path, Path]:
+    """割りstep0001と同じフォルダーに作る2種類の不一致TSVパスを返します。"""
+    return (
+        objStep0001Path.with_name(ALLOCATION_STORE_CODE_MISMATCH_FILE_NAME),
+        objStep0001Path.with_name(ALLOCATION_STORE_NAME_MISMATCH_FILE_NAME),
+    )
+
+
+def build_allocation_mismatch_rows(
+    listRows: list[list[str]],
+) -> tuple[list[list[str]], list[list[str]]]:
+    """割りstep0001を検証し、店舗コード不一致行と店舗名不一致行を返します。"""
+    if not listRows:
+        raise ValueError("割りstep0001 TSVが空です。")
+    if tuple(listRows[0]) != ALLOCATION_MAPPING_HEADERS:
+        raise ValueError(
+            "割りstep0001 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_MAPPING_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listRows[0])
+        )
+    listStoreCodeMismatchRows: list[list[str]] = []
+    listStoreNameMismatchRows: list[list[str]] = []
+    for iRowNumber, listValues in enumerate(listRows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_MAPPING_HEADERS):
+            raise ValueError(
+                "割りstep0001 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = "
+                + str(len(ALLOCATION_MAPPING_HEADERS))
+                + "、実際の列数 = "
+                + str(len(listValues))
+            )
+        if listValues[1] != listValues[3]:
+            listStoreCodeMismatchRows.append(listValues)
+        elif listValues[2] != listValues[4]:
+            listStoreNameMismatchRows.append(listValues)
+    return listStoreCodeMismatchRows, listStoreNameMismatchRows
+
+
+def replace_allocation_mismatch_files(
+    dictTemporaryPaths: dict[Path, Path], dictBackupPaths: dict[Path, Path]
+) -> None:
+    """2種類の不一致TSVを一括置換し、失敗時は処理前の状態へ戻します。"""
+    listRenamedOutputs: list[tuple[Path, Path]] = []
+    listReplacedOutputs: list[Path] = []
+    try:
+        for objOutputPath, objBackupPath in dictBackupPaths.items():
+            if objBackupPath.exists():
+                raise FileExistsError(
+                    "バックアップ先がすでに存在します。Path = " + str(objBackupPath)
+                )
+            os.rename(objOutputPath, objBackupPath)
+            listRenamedOutputs.append((objOutputPath, objBackupPath))
+        for objOutputPath, objTemporaryPath in dictTemporaryPaths.items():
+            os.replace(objTemporaryPath, objOutputPath)
+            listReplacedOutputs.append(objOutputPath)
+    except Exception:
+        for objOutputPath in reversed(listReplacedOutputs):
+            if objOutputPath.exists():
+                objOutputPath.unlink()
+        for objOutputPath, objBackupPath in reversed(listRenamedOutputs):
+            if objBackupPath.exists():
+                os.rename(objBackupPath, objOutputPath)
+        raise
+
+
+def process_allocation_mismatch_files(
+    objStep0001Path: Path,
+) -> tuple[Path, int, Path, int, dict[Path, Path]]:
+    """割りstep0001から2種類の不一致TSVを作成します。"""
+    if not objStep0001Path.exists() or not objStep0001Path.is_file():
+        raise ValueError(
+            "割りstep0001 TSVが見つかりません。Path = " + str(objStep0001Path)
+        )
+    listRows: list[list[str]] = read_tsv_rows(objStep0001Path)
+    listStoreCodeMismatchRows, listStoreNameMismatchRows = (
+        build_allocation_mismatch_rows(listRows)
+    )
+    objStoreCodeMismatchPath, objStoreNameMismatchPath = (
+        get_allocation_mismatch_output_paths(objStep0001Path)
+    )
+    dictOutputRows: dict[Path, list[list[str]]] = {
+        objStoreCodeMismatchPath: listStoreCodeMismatchRows,
+        objStoreNameMismatchPath: listStoreNameMismatchRows,
+    }
+    dictBackupPaths: dict[Path, Path] = {
+        objOutputPath: get_next_backup_path(objOutputPath)
+        for objOutputPath in dictOutputRows
+        if objOutputPath.exists()
+    }
+    dictTemporaryPaths: dict[Path, Path] = {}
+    try:
+        for objOutputPath, listMismatchRows in dictOutputRows.items():
+            objTemporaryPath: Path = create_temporary_path(objOutputPath)
+            dictTemporaryPaths[objOutputPath] = objTemporaryPath
+            save_tsv_rows(
+                objTemporaryPath,
+                [list(ALLOCATION_MAPPING_HEADERS)] + listMismatchRows,
+            )
+        replace_allocation_mismatch_files(dictTemporaryPaths, dictBackupPaths)
+    finally:
+        for objTemporaryPath in dictTemporaryPaths.values():
+            if objTemporaryPath.exists():
+                objTemporaryPath.unlink()
+    return (
+        objStoreCodeMismatchPath,
+        len(listStoreCodeMismatchRows),
+        objStoreNameMismatchPath,
+        len(listStoreNameMismatchRows),
+        dictBackupPaths,
+    )
 
 
 def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
@@ -727,6 +851,11 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         )
     objCreatedAllocationMappingPath: Path | None = None
     iAllocationMappingRowCount: int = 0
+    objStoreCodeMismatchPath: Path | None = None
+    iStoreCodeMismatchCount: int = 0
+    objStoreNameMismatchPath: Path | None = None
+    iStoreNameMismatchCount: int = 0
+    dictAllocationMismatchBackupPaths: dict[Path, Path] = {}
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
     iMappingCenterCount: int = 0
@@ -739,9 +868,24 @@ def process_input_file(pszInputFileFullPath: str) -> None:
                 objCreatedAllocationMappingPath,
                 iAllocationMappingRowCount,
             ) = process_allocation_mapping_file(dictOutputPaths["割り"])
+            (
+                objStoreCodeMismatchPath,
+                iStoreCodeMismatchCount,
+                objStoreNameMismatchPath,
+                iStoreNameMismatchCount,
+                dictAllocationMismatchBackupPaths,
+            ) = process_allocation_mismatch_files(objCreatedAllocationMappingPath)
             listMappingResultLines.append(
                 "処理A（割り対応表）: 成功\n出力ファイル: "
                 + str(objCreatedAllocationMappingPath)
+                + "\n店舗コード不一致ファイル: "
+                + str(objStoreCodeMismatchPath)
+                + "\n店舗コード不一致件数: "
+                + str(iStoreCodeMismatchCount)
+                + "\n店舗名不一致ファイル: "
+                + str(objStoreNameMismatchPath)
+                + "\n店舗名不一致件数: "
+                + str(iStoreNameMismatchCount)
             )
         except Exception as objException:
             try:
@@ -842,6 +986,16 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             "Allocation Area Store Mapping Rows: "
             + str(iAllocationMappingRowCount)
         )
+    if objStoreCodeMismatchPath is not None and objStoreNameMismatchPath is not None:
+        print("Allocation Store Mismatch Result: Success")
+        print("Allocation Store Mismatch Input: " + str(objCreatedAllocationMappingPath))
+        print("Allocation Store Code Mismatch TSV: " + str(objStoreCodeMismatchPath))
+        print("Allocation Store Code Mismatch Rows: " + str(iStoreCodeMismatchCount))
+        print("Allocation Store Name Mismatch TSV: " + str(objStoreNameMismatchPath))
+        print("Allocation Store Name Mismatch Rows: " + str(iStoreNameMismatchCount))
+        for objOutputPath, objBackupPath in dictAllocationMismatchBackupPaths.items():
+            print("Allocation Store Mismatch Previous TSV: " + str(objOutputPath))
+            print("Allocation Store Mismatch Backup TSV: " + str(objBackupPath))
 
 
 def main() -> int:
