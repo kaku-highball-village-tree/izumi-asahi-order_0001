@@ -70,6 +70,16 @@ ALLOCATION_STEP0004_HEADERS: tuple[str, str, str, str] = (
     "店舗コード",
     "店舗略称",
 )
+ALLOCATION_STEP0005_FILE_NAME: str = "AsahiOrderAreaStoreMapping_割り_step0005.tsv"
+ALLOCATION_STEP0005_ERROR_FILE_NAME: str = (
+    "AsahiOrderAreaStoreMapping_割り_step0005_error.txt"
+)
+ALLOCATION_STEP0005_EXCLUDED_AREAS: set[str] = {"熊本", "九州", "北九州"}
+ALLOCATION_STEP0005_CENTER_NAMES: dict[str, str] = {
+    "広島": "①広島センター",
+    "岡山": "②広島センター(岡山・四国転送分)",
+    "四国／岡山": "②広島センター(岡山・四国転送分)",
+}
 CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
@@ -890,6 +900,126 @@ def report_allocation_step0004_error(
     return objErrorPath
 
 
+def get_allocation_step0005_paths(objStep0004Path: Path) -> tuple[Path, Path]:
+    """割りstep0005出力と専用エラーの各パスを返します。"""
+    return (
+        objStep0004Path.with_name(ALLOCATION_STEP0005_FILE_NAME),
+        objStep0004Path.with_name(ALLOCATION_STEP0005_ERROR_FILE_NAME),
+    )
+
+
+def build_allocation_step0005_rows(
+    listStep0004Rows: list[list[str]],
+) -> tuple[list[list[str]], int, int, int]:
+    """指定エリアを除外し、空の配送センター名をエリア別に補完します。"""
+    if not listStep0004Rows:
+        raise ValueError("割りstep0004 TSVが空です。")
+    if tuple(listStep0004Rows[0]) != ALLOCATION_STEP0004_HEADERS:
+        raise ValueError(
+            "割りstep0004 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_STEP0004_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listStep0004Rows[0])
+        )
+    listOutputRows: list[list[str]] = [list(ALLOCATION_STEP0004_HEADERS)]
+    iInputRowCount: int = 0
+    iDeletedRowCount: int = 0
+    iFilledRowCount: int = 0
+    iUnchangedRowCount: int = 0
+    for iRowNumber, listValues in enumerate(listStep0004Rows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_STEP0004_HEADERS):
+            raise ValueError(
+                "割りstep0004 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 4、実際の列数 = "
+                + str(len(listValues))
+            )
+        iInputRowCount += 1
+        pszAreaName: str = listValues[1]
+        if pszAreaName in ALLOCATION_STEP0005_EXCLUDED_AREAS:
+            iDeletedRowCount += 1
+            continue
+        listOutputRow: list[str] = listValues.copy()
+        pszCenterName: str | None = ALLOCATION_STEP0005_CENTER_NAMES.get(pszAreaName)
+        if pszCenterName is not None and listOutputRow[0].strip() == "":
+            listOutputRow[0] = pszCenterName
+            iFilledRowCount += 1
+        else:
+            iUnchangedRowCount += 1
+        listOutputRows.append(listOutputRow)
+    if iInputRowCount != iDeletedRowCount + iFilledRowCount + iUnchangedRowCount:
+        raise ValueError(
+            "割りstep0005の分類件数が入力行数と一致しません。入力行数 = "
+            + str(iInputRowCount)
+        )
+    if len(listOutputRows) - 1 != iInputRowCount - iDeletedRowCount:
+        raise ValueError(
+            "割りstep0005の出力行数が正しくありません。期待行数 = "
+            + str(iInputRowCount - iDeletedRowCount)
+            + "、実際の行数 = "
+            + str(len(listOutputRows) - 1)
+        )
+    return listOutputRows, iDeletedRowCount, iFilledRowCount, iUnchangedRowCount
+
+
+def process_allocation_step0005_file(
+    objStep0004Path: Path,
+) -> tuple[Path, int, int, int, int, int, Path | None]:
+    """割りstep0004を再読込し、エリアの除外・センター補完済みTSVを作ります。"""
+    if not objStep0004Path.exists() or not objStep0004Path.is_file():
+        raise ValueError(
+            "割りstep0004 TSVが見つかりません。Path = " + str(objStep0004Path)
+        )
+    listStep0004Rows: list[list[str]] = read_tsv_rows(objStep0004Path)
+    listOutputRows, iDeletedRowCount, iFilledRowCount, iUnchangedRowCount = (
+        build_allocation_step0005_rows(listStep0004Rows)
+    )
+    iInputRowCount: int = iDeletedRowCount + iFilledRowCount + iUnchangedRowCount
+    objOutputPath, _ = get_allocation_step0005_paths(objStep0004Path)
+    objBackupPath: Path | None = (
+        get_next_backup_path(objOutputPath) if objOutputPath.exists() else None
+    )
+    objTemporaryPath: Path = create_temporary_path(objOutputPath)
+    try:
+        save_tsv_rows(objTemporaryPath, listOutputRows)
+        if read_tsv_rows(objTemporaryPath) != listOutputRows:
+            raise ValueError("割りstep0005 TSVの保存後検証に失敗しました。")
+        replace_allocation_step0002_file(
+            objOutputPath, objTemporaryPath, objBackupPath
+        )
+    finally:
+        if objTemporaryPath.exists():
+            objTemporaryPath.unlink()
+    return (
+        objOutputPath,
+        iInputRowCount,
+        iDeletedRowCount,
+        iFilledRowCount,
+        iUnchangedRowCount,
+        len(listOutputRows) - 1,
+        objBackupPath,
+    )
+
+
+def report_allocation_step0005_error(
+    objStep0004Path: Path, pszDetailMessage: str
+) -> Path:
+    """step0005作成エラーを標準エラーと専用エラーファイルへ出力します。"""
+    _, objErrorPath = get_allocation_step0005_paths(objStep0004Path)
+    pszErrorMessage: str = (
+        "処理結果: エラー\n入力ファイル: "
+        + str(objStep0004Path)
+        + "\n発生した処理: 割りstep0005作成処理\nエラー内容: "
+        + pszDetailMessage
+        + "\n"
+    )
+    print(pszErrorMessage, file=sys.stderr, end="")
+    write_error_text(str(objErrorPath), pszErrorMessage)
+    return objErrorPath
+
+
 def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
     """指定列が存在すれば値を返し、列不足なら空文字を返します。"""
     if iColumnIndex >= len(listValues):
@@ -1350,6 +1480,13 @@ def process_input_file(pszInputFileFullPath: str) -> None:
     iAllocationStep0004MatchedRowCount: int = 0
     iAllocationStep0004UnmatchedRowCount: int = 0
     objAllocationStep0004BackupPath: Path | None = None
+    objAllocationStep0005Path: Path | None = None
+    iAllocationStep0005InputRowCount: int = 0
+    iAllocationStep0005DeletedRowCount: int = 0
+    iAllocationStep0005FilledRowCount: int = 0
+    iAllocationStep0005UnchangedRowCount: int = 0
+    iAllocationStep0005OutputRowCount: int = 0
+    objAllocationStep0005BackupPath: Path | None = None
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
     iMappingCenterCount: int = 0
@@ -1595,6 +1732,46 @@ def process_input_file(pszInputFileFullPath: str) -> None:
         )
     else:
         listMappingResultLines.append("処理E（割りstep0004作成）: スキップ")
+    if objAllocationStep0004Path is not None:
+        try:
+            (
+                objAllocationStep0005Path,
+                iAllocationStep0005InputRowCount,
+                iAllocationStep0005DeletedRowCount,
+                iAllocationStep0005FilledRowCount,
+                iAllocationStep0005UnchangedRowCount,
+                iAllocationStep0005OutputRowCount,
+                objAllocationStep0005BackupPath,
+            ) = process_allocation_step0005_file(objAllocationStep0004Path)
+            _, objStep0005ErrorPath = get_allocation_step0005_paths(
+                objAllocationStep0004Path
+            )
+            if objStep0005ErrorPath.exists():
+                objStep0005ErrorPath.unlink()
+            listMappingResultLines.append(
+                "処理F（割りstep0005作成）: 成功\n出力ファイル: "
+                + str(objAllocationStep0005Path)
+            )
+        except Exception as objException:
+            try:
+                objStep0005ErrorPath = report_allocation_step0005_error(
+                    objAllocationStep0004Path, str(objException)
+                )
+                pszErrorFileDetail = "\nエラーファイル: " + str(
+                    objStep0005ErrorPath
+                )
+            except Exception as objErrorFileException:
+                pszErrorFileDetail = (
+                    "\nstep0005_error.txtの保存にも失敗しました。Detail = "
+                    + str(objErrorFileException)
+                )
+            listMappingErrorLines.append(
+                "処理F（割りstep0005作成）: エラー\nエラー内容: "
+                + str(objException)
+                + pszErrorFileDetail
+            )
+    else:
+        listMappingResultLines.append("処理F（割りstep0005作成）: スキップ")
     if listMappingErrorLines:
         raise ValueError(
             "\n\n".join(listMappingErrorLines + listMappingResultLines)
@@ -1705,6 +1882,35 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             print(
                 "Allocation Step0004 Backup TSV: "
                 + str(objAllocationStep0004BackupPath)
+            )
+    if objAllocationStep0005Path is not None:
+        print("Allocation Step0005 Result: Success")
+        print("Allocation Step0005 Input: " + str(objAllocationStep0004Path))
+        print("Allocation Step0005 TSV: " + str(objAllocationStep0005Path))
+        print(
+            "Allocation Step0005 Input Rows: "
+            + str(iAllocationStep0005InputRowCount)
+        )
+        print(
+            "Allocation Step0005 Deleted Rows: "
+            + str(iAllocationStep0005DeletedRowCount)
+        )
+        print(
+            "Allocation Step0005 Center Filled Rows: "
+            + str(iAllocationStep0005FilledRowCount)
+        )
+        print(
+            "Allocation Step0005 Unchanged Rows: "
+            + str(iAllocationStep0005UnchangedRowCount)
+        )
+        print(
+            "Allocation Step0005 Output Rows: "
+            + str(iAllocationStep0005OutputRowCount)
+        )
+        if objAllocationStep0005BackupPath is not None:
+            print(
+                "Allocation Step0005 Backup TSV: "
+                + str(objAllocationStep0005BackupPath)
             )
 
 
