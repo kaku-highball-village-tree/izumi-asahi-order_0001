@@ -80,6 +80,18 @@ ALLOCATION_STEP0005_CENTER_NAMES: dict[str, str] = {
     "岡山": "②広島センター(岡山・四国転送分)",
     "四国／岡山": "②広島センター(岡山・四国転送分)",
 }
+AREA_STORE_MAPPING_TEXT_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表.txt"
+AREA_STORE_MAPPING_TSV_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表.tsv"
+AREA_STORE_MAPPING_ERROR_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表_error.txt"
+FINAL_AREA_STORE_MAPPING_HEADERS: tuple[str, str, str] = (
+    "配送センター名",
+    "店舗コード",
+    "店舗略称",
+)
+FINAL_DISTRIBUTION_CENTER_NAMES: dict[str, str] = {
+    "①広島センター": "広島センター",
+    "②広島センター(岡山・四国転送分)": "広島センター(岡山・四国転送分)",
+}
 CIRCLED_NUMBERS: str = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
@@ -1020,6 +1032,192 @@ def report_allocation_step0005_error(
     return objErrorPath
 
 
+def get_final_area_store_mapping_paths(
+    objStep0005Path: Path,
+) -> tuple[Path, Path, Path]:
+    """最終対応表TXT・TSVと専用エラーの各パスを返します。"""
+    return (
+        objStep0005Path.with_name(AREA_STORE_MAPPING_TEXT_FILE_NAME),
+        objStep0005Path.with_name(AREA_STORE_MAPPING_TSV_FILE_NAME),
+        objStep0005Path.with_name(AREA_STORE_MAPPING_ERROR_FILE_NAME),
+    )
+
+
+def build_final_area_store_mapping_rows(
+    listStep0005Rows: list[list[str]],
+) -> tuple[list[list[str]], int, int]:
+    """step0005からエリア名を除き、指定配送センター名を修正します。"""
+    if not listStep0005Rows:
+        raise ValueError("割りstep0005 TSVが空です。")
+    if tuple(listStep0005Rows[0]) != ALLOCATION_STEP0004_HEADERS:
+        raise ValueError(
+            "割りstep0005 TSVの項目名行が正しくありません。期待値 = "
+            + "\\t".join(ALLOCATION_STEP0004_HEADERS)
+            + "、実際の値 = "
+            + "\\t".join(listStep0005Rows[0])
+        )
+    listOutputRows: list[list[str]] = [list(FINAL_AREA_STORE_MAPPING_HEADERS)]
+    iFirstCenterChangedCount: int = 0
+    iSecondCenterChangedCount: int = 0
+    for iRowNumber, listValues in enumerate(listStep0005Rows[1:], start=2):
+        if not listValues:
+            continue
+        if len(listValues) != len(ALLOCATION_STEP0004_HEADERS):
+            raise ValueError(
+                "割りstep0005 TSVのデータ行の列数が正しくありません。行 = "
+                + str(iRowNumber)
+                + "、期待列数 = 4、実際の列数 = "
+                + str(len(listValues))
+            )
+        pszDistributionCenterName: str = listValues[0]
+        pszUpdatedCenterName: str = FINAL_DISTRIBUTION_CENTER_NAMES.get(
+            pszDistributionCenterName, pszDistributionCenterName
+        )
+        if pszDistributionCenterName == "①広島センター":
+            iFirstCenterChangedCount += 1
+        elif pszDistributionCenterName == "②広島センター(岡山・四国転送分)":
+            iSecondCenterChangedCount += 1
+        listOutputRows.append(
+            [pszUpdatedCenterName, listValues[2], listValues[3]]
+        )
+    iInputDataRowCount: int = sum(
+        1 for listValues in listStep0005Rows[1:] if listValues
+    )
+    if len(listOutputRows) - 1 != iInputDataRowCount:
+        raise ValueError(
+            "割りstep0005と対応表のデータ行数が一致しません。入力行数 = "
+            + str(iInputDataRowCount)
+            + "、出力行数 = "
+            + str(len(listOutputRows) - 1)
+        )
+    return listOutputRows, iFirstCenterChangedCount, iSecondCenterChangedCount
+
+
+def get_next_final_mapping_backup_path(objOutputPath: Path) -> Path:
+    """最終対応表に対応する次の.bk0001形式の連番バックアップを返します。"""
+    objPattern: re.Pattern[str] = re.compile(
+        r"^"
+        + re.escape(objOutputPath.name)
+        + r"\.bk([0-9]{4})"
+        + re.escape(objOutputPath.suffix)
+        + r"$"
+    )
+    listBackupNumbers: list[int] = []
+    for objCandidatePath in objOutputPath.parent.iterdir():
+        objMatch: re.Match[str] | None = objPattern.fullmatch(objCandidatePath.name)
+        if objMatch is None or not objCandidatePath.is_file():
+            continue
+        iBackupNumber: int = int(objMatch.group(1))
+        if 1 <= iBackupNumber <= MAX_BACKUP_NUMBER:
+            listBackupNumbers.append(iBackupNumber)
+    iBackupNumber: int = 1 if not listBackupNumbers else max(listBackupNumbers) + 1
+    if iBackupNumber > MAX_BACKUP_NUMBER:
+        raise ValueError(
+            "対応表のバックアップ番号が最大値9999に到達しています。Path = "
+            + str(objOutputPath)
+        )
+    return objOutputPath.with_name(
+        objOutputPath.name + f".bk{iBackupNumber:04d}" + objOutputPath.suffix
+    )
+
+
+def replace_final_area_store_mapping_files(
+    dictTemporaryPaths: dict[Path, Path], dictBackupPaths: dict[Path, Path]
+) -> None:
+    """対応表TXT・TSVを一括置換し、失敗時は両方の既存出力を復元します。"""
+    listRenamedOutputs: list[tuple[Path, Path]] = []
+    listReplacedOutputs: list[Path] = []
+    try:
+        for objOutputPath, objBackupPath in dictBackupPaths.items():
+            if objBackupPath.exists():
+                raise FileExistsError(
+                    "バックアップ先がすでに存在します。Path = " + str(objBackupPath)
+                )
+            os.rename(objOutputPath, objBackupPath)
+            listRenamedOutputs.append((objOutputPath, objBackupPath))
+        for objOutputPath, objTemporaryPath in dictTemporaryPaths.items():
+            os.replace(objTemporaryPath, objOutputPath)
+            listReplacedOutputs.append(objOutputPath)
+    except Exception:
+        for objOutputPath in reversed(listReplacedOutputs):
+            if objOutputPath.exists():
+                objOutputPath.unlink()
+        for objOutputPath, objBackupPath in reversed(listRenamedOutputs):
+            if objBackupPath.exists():
+                os.rename(objBackupPath, objOutputPath)
+        raise
+
+
+def process_final_area_store_mapping_files(
+    objStep0005Path: Path,
+) -> tuple[Path, Path, int, int, int, dict[Path, Path]]:
+    """割りstep0005を再読込し、同一内容の最終対応表TXT・TSVを作ります。"""
+    if not objStep0005Path.exists() or not objStep0005Path.is_file():
+        raise ValueError(
+            "割りstep0005 TSVが見つかりません。Path = " + str(objStep0005Path)
+        )
+    listStep0005Rows: list[list[str]] = read_tsv_rows(objStep0005Path)
+    listOutputRows, iFirstCenterChangedCount, iSecondCenterChangedCount = (
+        build_final_area_store_mapping_rows(listStep0005Rows)
+    )
+    objTextPath, objTsvPath, _ = get_final_area_store_mapping_paths(
+        objStep0005Path
+    )
+    dictTemporaryPaths: dict[Path, Path] = {}
+    dictBackupPaths: dict[Path, Path] = {
+        objOutputPath: get_next_final_mapping_backup_path(objOutputPath)
+        for objOutputPath in (objTextPath, objTsvPath)
+        if objOutputPath.exists()
+    }
+    try:
+        for objOutputPath in (objTextPath, objTsvPath):
+            objTemporaryPath: Path = create_temporary_path(objOutputPath)
+            dictTemporaryPaths[objOutputPath] = objTemporaryPath
+            save_tsv_rows(objTemporaryPath, listOutputRows)
+            if read_tsv_rows(objTemporaryPath) != listOutputRows:
+                raise ValueError(
+                    "対応表の保存後検証に失敗しました。Path = "
+                    + str(objOutputPath)
+                )
+        if (
+            read_tsv_rows(dictTemporaryPaths[objTextPath])
+            != read_tsv_rows(dictTemporaryPaths[objTsvPath])
+        ):
+            raise ValueError("対応表TXTとTSVの内容が一致しません。")
+        replace_final_area_store_mapping_files(
+            dictTemporaryPaths, dictBackupPaths
+        )
+    finally:
+        for objTemporaryPath in dictTemporaryPaths.values():
+            if objTemporaryPath.exists():
+                objTemporaryPath.unlink()
+    return (
+        objTextPath,
+        objTsvPath,
+        len(listOutputRows) - 1,
+        iFirstCenterChangedCount,
+        iSecondCenterChangedCount,
+        dictBackupPaths,
+    )
+
+
+def report_final_area_store_mapping_error(
+    objStep0005Path: Path, pszDetailMessage: str
+) -> Path:
+    """対応表作成エラーを標準エラーと専用エラーファイルへ出力します。"""
+    _, _, objErrorPath = get_final_area_store_mapping_paths(objStep0005Path)
+    pszErrorMessage: str = (
+        "処理結果: エラー\n入力ファイル: "
+        + str(objStep0005Path)
+        + "\n発生した処理: 朝日注文エリア店舗対応表作成処理\nエラー内容: "
+        + pszDetailMessage
+        + "\n"
+    )
+    print(pszErrorMessage, file=sys.stderr, end="")
+    write_error_text(str(objErrorPath), pszErrorMessage)
+    return objErrorPath
+
+
 def get_row_value(listValues: list[str], iColumnIndex: int) -> str:
     """指定列が存在すれば値を返し、列不足なら空文字を返します。"""
     if iColumnIndex >= len(listValues):
@@ -1487,6 +1685,12 @@ def process_input_file(pszInputFileFullPath: str) -> None:
     iAllocationStep0005UnchangedRowCount: int = 0
     iAllocationStep0005OutputRowCount: int = 0
     objAllocationStep0005BackupPath: Path | None = None
+    objFinalMappingTextPath: Path | None = None
+    objFinalMappingTsvPath: Path | None = None
+    iFinalMappingRowCount: int = 0
+    iFinalFirstCenterChangedCount: int = 0
+    iFinalSecondCenterChangedCount: int = 0
+    dictFinalMappingBackupPaths: dict[Path, Path] = {}
     objCreatedMappingPath: Path | None = None
     iMappingRowCount: int = 0
     iMappingCenterCount: int = 0
@@ -1772,6 +1976,49 @@ def process_input_file(pszInputFileFullPath: str) -> None:
             )
     else:
         listMappingResultLines.append("処理F（割りstep0005作成）: スキップ")
+    if objAllocationStep0005Path is not None:
+        try:
+            (
+                objFinalMappingTextPath,
+                objFinalMappingTsvPath,
+                iFinalMappingRowCount,
+                iFinalFirstCenterChangedCount,
+                iFinalSecondCenterChangedCount,
+                dictFinalMappingBackupPaths,
+            ) = process_final_area_store_mapping_files(objAllocationStep0005Path)
+            _, _, objFinalMappingErrorPath = get_final_area_store_mapping_paths(
+                objAllocationStep0005Path
+            )
+            if objFinalMappingErrorPath.exists():
+                objFinalMappingErrorPath.unlink()
+            listMappingResultLines.append(
+                "処理G（朝日注文エリア店舗対応表作成）: 成功\n出力TXT: "
+                + str(objFinalMappingTextPath)
+                + "\n出力TSV: "
+                + str(objFinalMappingTsvPath)
+            )
+        except Exception as objException:
+            try:
+                objFinalMappingErrorPath = report_final_area_store_mapping_error(
+                    objAllocationStep0005Path, str(objException)
+                )
+                pszErrorFileDetail = "\nエラーファイル: " + str(
+                    objFinalMappingErrorPath
+                )
+            except Exception as objErrorFileException:
+                pszErrorFileDetail = (
+                    "\n対応表_error.txtの保存にも失敗しました。Detail = "
+                    + str(objErrorFileException)
+                )
+            listMappingErrorLines.append(
+                "処理G（朝日注文エリア店舗対応表作成）: エラー\nエラー内容: "
+                + str(objException)
+                + pszErrorFileDetail
+            )
+    else:
+        listMappingResultLines.append(
+            "処理G（朝日注文エリア店舗対応表作成）: スキップ"
+        )
     if listMappingErrorLines:
         raise ValueError(
             "\n\n".join(listMappingErrorLines + listMappingResultLines)
@@ -1912,6 +2159,23 @@ def process_input_file(pszInputFileFullPath: str) -> None:
                 "Allocation Step0005 Backup TSV: "
                 + str(objAllocationStep0005BackupPath)
             )
+    if objFinalMappingTextPath is not None and objFinalMappingTsvPath is not None:
+        print("Final Area Store Mapping Result: Success")
+        print("Final Area Store Mapping Input: " + str(objAllocationStep0005Path))
+        print("Final Area Store Mapping TXT: " + str(objFinalMappingTextPath))
+        print("Final Area Store Mapping TSV: " + str(objFinalMappingTsvPath))
+        print("Final Area Store Mapping Rows: " + str(iFinalMappingRowCount))
+        print(
+            "Final Area Store Mapping ①広島センター Changed Rows: "
+            + str(iFinalFirstCenterChangedCount)
+        )
+        print(
+            "Final Area Store Mapping ②広島センター(岡山・四国転送分) Changed Rows: "
+            + str(iFinalSecondCenterChangedCount)
+        )
+        for objOutputPath, objBackupPath in dictFinalMappingBackupPaths.items():
+            print("Final Area Store Mapping Previous File: " + str(objOutputPath))
+            print("Final Area Store Mapping Backup File: " + str(objBackupPath))
 
 
 def main() -> int:

@@ -22,8 +22,9 @@ from AsahiOrderAreaStoreMappingMaker_Cmd import report_processing_error
 
 WINDOW_TITLE: str = "Asahi Order Area Store Mapping Maker (Drag & Drop)"
 MAX_RESULT_BACKUP_NUMBER: int = 9999
-FINAL_ALLOCATION_OUTPUT_FILE_NAME: str = (
-    "AsahiOrderAreaStoreMapping_割り_step0005.tsv"
+FINAL_AREA_STORE_MAPPING_FILE_NAMES: tuple[str, str] = (
+    "AsahiOrderAreaStoreMapping_対応表.txt",
+    "AsahiOrderAreaStoreMapping_対応表.tsv",
 )
 
 
@@ -144,7 +145,7 @@ def build_success_summary_message(
         + "入力ファイル:\n"
         + os.path.basename(pszInputFileFullPath)
         + "\n\n最終出力:\n"
-        + FINAL_ALLOCATION_OUTPUT_FILE_NAME
+        + "\n".join(FINAL_AREA_STORE_MAPPING_FILE_NAMES)
         + "\n\n詳細結果:\n"
         + os.path.basename(pszResultFileFullPath)
         + "\n\n各ファイルは入力ファイルと同じフォルダーに保存しました。"
@@ -161,7 +162,7 @@ def build_result_save_warning_message(
         + "入力ファイル:\n"
         + os.path.basename(pszInputFileFullPath)
         + "\n\n最終出力:\n"
-        + FINAL_ALLOCATION_OUTPUT_FILE_NAME
+        + "\n".join(FINAL_AREA_STORE_MAPPING_FILE_NAMES)
         + "\n\n詳細結果保存エラー:\n"
         + str(objException).splitlines()[0]
     )
@@ -241,6 +242,7 @@ def draw_instruction_text(iWindowHandle: int) -> None:
         "step0002からAPEXの2列を除いたstep0003 TSVを作成します。\n"
         "週間店舗対応表から配送センター名を付けたstep0004 TSVを作成します。\n"
         "指定エリアを除外し、配送センター名を補完したstep0005 TSVを作成します。\n"
+        "step0005からエリア名を除いた最終対応表TXT・TSVを作成します。\n"
         "「本州マグロ(週間)」から週間店舗対応表も作成します。\n"
         "対象シートがない場合は_warning.txtを出力します。\n"
         "存在しないシートの旧TSVは.bk0001.tsv形式へ名前変更します。\n"
@@ -358,7 +360,7 @@ def create_main_window(pszWindowClassName: str, pszWindowTitle: str) -> int:
         | win32con.WS_SYSMENU
         | win32con.WS_MINIMIZEBOX
     )
-    iWindowHeight: int = 460
+    iWindowHeight: int = 500
     iWindowWidth: int = int(iWindowHeight * 1.618)
     iWindowHandle: int = win32gui.CreateWindowEx(
         win32con.WS_EX_ACCEPTFILES,
