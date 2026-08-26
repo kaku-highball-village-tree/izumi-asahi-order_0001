@@ -19,6 +19,7 @@ from AsahiOrderTemplateMaker_Cmd import report_processing_error, select_start_mo
 
 
 WINDOW_TITLE: str = "Asahi Order Template Maker (Drag & Drop)"
+MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表.txt"
 
 
 def show_message_box(pszMessage: str, pszTitle: str) -> None:
@@ -36,6 +37,7 @@ def show_error_message_box(pszMessage: str, pszTitle: str) -> None:
 def run_asahi_order_template_maker_cmd(
     pszInputFileFullPath: str,
     pszStartMonday: str,
+    pszMappingFileFullPath: str,
 ) -> tuple[bool, str]:
     """同じフォルダーのCmdプログラムを実行します。"""
     pszCurrentDirectoryFullPath: str = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +60,8 @@ def run_asahi_order_template_maker_cmd(
                 pszScriptFileFullPath,
                 "--start-monday",
                 pszStartMonday,
+                "--mapping-file",
+                pszMappingFileFullPath,
                 pszInputFileFullPath,
             ],
             check=False,
@@ -105,7 +109,8 @@ def draw_instruction_text(iWindowHandle: int) -> None:
     pszInstructionText: str = (
         "Excel、TSV、またはCSVファイルをこのウィンドウにドラッグ＆ドロップしてください。\n"
         "開始月曜日をカレンダーから選択します。初期選択は来週の月曜日です。\n"
-        "同じフォルダーにstep0001～step0005のXLSX・TSVを作成します。\n"
+        "プログラムと同じフォルダーの配送センター・店舗対応表を使用します。\n"
+        "同じフォルダーにstep0001～step0006のXLSX・TSVを作成します。\n"
         "既存の出力ファイルは自動的に上書きします。\n"
         "キャンセルまたはエラー時は <元ファイル名>_error.txt を出力します。"
     )
@@ -137,6 +142,25 @@ def window_proc(
                 win32api.DragQueryFile(iDropHandle, iFileIndex)
                 for iFileIndex in range(iFileCount)
             ]
+            pszCurrentDirectoryFullPath: str = os.path.dirname(os.path.abspath(__file__))
+            pszMappingFileFullPath: str = os.path.join(
+                pszCurrentDirectoryFullPath, MAPPING_FILE_NAME
+            )
+            if not os.path.isfile(pszMappingFileFullPath):
+                pszMappingError: str = (
+                    MAPPING_FILE_NAME
+                    + " が見つかりません。\n\n"
+                    + "プログラムと同じフォルダーに配置してください。\n"
+                    + "処理0006を完了できないため、処理を中止します。"
+                )
+                for pszDroppedFilePath in listDroppedFilePaths:
+                    report_processing_error(
+                        pszDroppedFilePath,
+                        "朝日注文テンプレート処理0006",
+                        pszMappingError,
+                    )
+                show_error_message_box(pszMappingError, WINDOW_TITLE)
+                return 0
             try:
                 objStartMonday = select_start_monday()
             except Exception as objException:
@@ -170,13 +194,20 @@ def window_proc(
                 return 0
             pszStartMonday: str = objStartMonday.isoformat()
             listFailedFileNames: list[str] = []
+            listSuccessMessages: list[str] = []
             iSuccessCount: int = 0
             for pszDroppedFilePath in listDroppedFilePaths:
-                bIsSuccess, _ = run_asahi_order_template_maker_cmd(
-                    pszDroppedFilePath, pszStartMonday
+                bIsSuccess, pszResultMessage = run_asahi_order_template_maker_cmd(
+                    pszDroppedFilePath, pszStartMonday, pszMappingFileFullPath
                 )
                 if bIsSuccess:
                     iSuccessCount += 1
+                    listWarnings: list[str] = [
+                        pszLine for pszLine in pszResultMessage.splitlines()
+                        if pszLine.startswith("警告:")
+                    ]
+                    if listWarnings:
+                        listSuccessMessages.extend(listWarnings)
                 else:
                     listFailedFileNames.append(os.path.basename(pszDroppedFilePath))
             pszMessage: str = (
@@ -192,6 +223,8 @@ def window_proc(
                 pszMessage += "\n失敗: " + ", ".join(listFailedFileNames)
                 show_error_message_box(pszMessage, WINDOW_TITLE)
             else:
+                if listSuccessMessages:
+                    pszMessage += "\n\n" + "\n".join(listSuccessMessages)
                 show_message_box(pszMessage, WINDOW_TITLE)
         finally:
             win32api.DragFinish(iDropHandle)

@@ -11,6 +11,7 @@ import csv
 import hashlib
 import os
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -79,6 +80,7 @@ STORE_DEFINITIONS: tuple[tuple[str, str], ...] = (
     ("151", "五日市"),
 )
 SUPPORTED_EXTENSIONS: set[str] = {".xlsx", ".tsv", ".csv"}
+AREA_STORE_MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表.txt"
 
 
 class ProductRow:
@@ -104,6 +106,10 @@ class Step0004Error(Exception):
 
 class Step0005Error(Exception):
     """処理0005で発生したエラーであることを呼び出し元へ伝えます。"""
+
+
+class Step0006Error(Exception):
+    """処理0006で発生したエラーであることを呼び出し元へ伝えます。"""
 
 
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
@@ -1121,9 +1127,328 @@ def process_step0005_files(
         raise Step0005Error(str(objException)) from objException
 
 
-def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
-    """入力から処理0001～処理0005のXLSX・TSVを作成します。"""
+def get_default_mapping_file_path() -> Path:
+    """プログラムと同じフォルダーの対応表パスを返します。"""
+    return Path(__file__).resolve().parent / AREA_STORE_MAPPING_FILE_NAME
+
+
+def read_area_store_mapping(
+    objMappingPath: Path,
+) -> list[tuple[str, str, str]]:
+    """配送センター・店舗コード・店舗略称の対応表を読み込みます。"""
+    if not objMappingPath.is_file():
+        raise ValueError("対応表が見つかりません。Path = " + str(objMappingPath))
+    listRows: list[list[str]] | None = None
+    objLastException: UnicodeDecodeError | None = None
+    for pszEncoding in ("utf-8-sig", "cp932"):
+        try:
+            with objMappingPath.open(mode="r", encoding=pszEncoding, newline="") as objFile:
+                listRows = list(csv.reader(objFile, delimiter="\t", strict=True))
+            break
+        except UnicodeDecodeError as objException:
+            objLastException = objException
+    if listRows is None:
+        raise ValueError("対応表の文字コードを判定できません。") from objLastException
+    listNonBlankRows: list[list[str]] = [
+        listRow for listRow in listRows if any(str(pszValue).strip() for pszValue in listRow)
+    ]
+    if not listNonBlankRows:
+        raise ValueError("対応表が空です。")
+    tupleExpectedHeaders: tuple[str, str, str] = (
+        "配送センター名", "店舗コード", "店舗略称"
+    )
+    if tuple(pszValue.strip() for pszValue in listNonBlankRows[0]) != tupleExpectedHeaders:
+        raise ValueError("対応表のヘッダーが仕様どおりではありません。")
+    listMappings: list[tuple[str, str, str]] = []
+    setStoreCodes: set[str] = set()
+    for iRow, listRow in enumerate(listNonBlankRows[1:], start=2):
+        if len(listRow) != 3:
+            raise ValueError(
+                f"対応表の{iRow}行目が3列ではありません。列数 = {len(listRow)}"
+            )
+        pszCenter, pszCode, pszName = (pszValue.strip() for pszValue in listRow)
+        if not pszCenter or not pszCode or not pszName:
+            raise ValueError(f"対応表の{iRow}行目に空欄があります。")
+        if pszCode in setStoreCodes:
+            raise ValueError("対応表の店舗コードが重複しています。Code = " + pszCode)
+        setStoreCodes.add(pszCode)
+        listMappings.append((pszCenter, pszCode, pszName))
+    if not listMappings:
+        raise ValueError("対応表に店舗定義がありません。")
+    return listMappings
+
+
+def normalize_step0005_cell(objValue: object, iColumn: int) -> str:
+    """処理0005のセルをXLSX・TSV比較用文字列へ変換します。"""
+    if iColumn == 0 and isinstance(objValue, datetime):
+        return objValue.date().strftime("%Y/%m/%d")
+    if iColumn == 0 and isinstance(objValue, date):
+        return objValue.strftime("%Y/%m/%d")
+    return normalize_text(objValue)
+
+
+def validate_step0005_table(listRows: list[list[str]], pszSource: str) -> None:
+    """処理0005の2行ヘッダー、店舗コード、列数を検証します。"""
+    if len(listRows) < 2:
+        raise ValueError(pszSource + "に2行ヘッダーがありません。")
+    iColumnCount: int = len(listRows[0])
+    if iColumnCount < len(STEP0002_HEADERS):
+        raise ValueError(pszSource + "の列数が14列未満です。")
+    for iRow, listRow in enumerate(listRows, start=1):
+        if len(listRow) != iColumnCount:
+            raise ValueError(
+                f"{pszSource}の{iRow}行目の列数が一致しません。"
+            )
+    if any(pszValue.strip() for pszValue in listRows[0][: len(STEP0002_HEADERS)]):
+        raise ValueError(pszSource + "の1行目A～N列が空欄ではありません。")
+    if tuple(pszValue.strip() for pszValue in listRows[1][: len(STEP0002_HEADERS)]) != STEP0002_HEADERS:
+        raise ValueError(pszSource + "の2行目A～N列が仕様どおりではありません。")
+    listStoreCodes: list[str] = [
+        pszValue.strip() for pszValue in listRows[0][len(STEP0002_HEADERS):]
+    ]
+    if any(not pszCode for pszCode in listStoreCodes):
+        raise ValueError(pszSource + "の店舗コードに空欄があります。")
+    if len(set(listStoreCodes)) != len(listStoreCodes):
+        raise ValueError(pszSource + "の店舗コードが重複しています。")
+
+
+def read_step0005_excel_table(objExcelPath: Path) -> list[list[str]]:
+    """処理0005 Excelの2行ヘッダーとデータを読み込みます。"""
+    objWorkbook: Workbook = load_workbook(objExcelPath, data_only=True)
+    if len(objWorkbook.worksheets) != 1:
+        raise ValueError("step0005 Excelのシート数が1ではありません。")
+    objWorksheet: Worksheet = objWorkbook.active
+    listRows: list[list[str]] = [
+        [
+            normalize_step0005_cell(objWorksheet.cell(iRow, iColumn).value, iColumn - 1)
+            for iColumn in range(1, objWorksheet.max_column + 1)
+        ]
+        for iRow in range(1, objWorksheet.max_row + 1)
+    ]
+    validate_step0005_table(listRows, "step0005 Excel")
+    return listRows
+
+
+def read_step0005_tsv_table(objTsvPath: Path) -> list[list[str]]:
+    """処理0005 TSVの2行ヘッダーとデータを読み込みます。"""
+    with objTsvPath.open(mode="r", encoding="utf-8", newline="") as objFile:
+        listRawRows: list[list[str]] = list(csv.reader(objFile, delimiter="\t", strict=True))
+    listRows: list[list[str]] = [
+        [normalize_step0005_cell(pszValue, iColumn) for iColumn, pszValue in enumerate(listRow)]
+        for listRow in listRawRows
+    ]
+    validate_step0005_table(listRows, "step0005 TSV")
+    return listRows
+
+
+def validate_step0005_tables_match(
+    listExcelRows: list[list[str]], listTsvRows: list[list[str]]
+) -> None:
+    """処理0005のXLSXとTSVの全セルが一致することを確認します。"""
+    if len(listExcelRows) != len(listTsvRows):
+        raise ValueError("step0005のXLSXとTSVの行数が一致しません。")
+    for iRow, (listExcelRow, listTsvRow) in enumerate(zip(listExcelRows, listTsvRows), start=1):
+        if len(listExcelRow) != len(listTsvRow):
+            raise ValueError(f"step0005の{iRow}行目の列数が一致しません。")
+        for iColumn, (pszExcel, pszTsv) in enumerate(zip(listExcelRow, listTsvRow), start=1):
+            if pszExcel != pszTsv:
+                raise ValueError(
+                    f"step0005のXLSXとTSVが一致しません。行 = {iRow}、列 = {iColumn}"
+                )
+
+
+def select_step0006_columns(
+    listStep0005Rows: list[list[str]], setTargetStoreCodes: set[str]
+) -> list[list[str]]:
+    """A～N列と指定された店舗コードの列を元の順序で抽出します。"""
+    listColumnIndexes: list[int] = list(range(len(STEP0002_HEADERS)))
+    listColumnIndexes.extend(
+        iColumn
+        for iColumn, pszCode in enumerate(listStep0005Rows[0])
+        if iColumn >= len(STEP0002_HEADERS) and pszCode.strip() in setTargetStoreCodes
+    )
+    return [[listRow[iColumn] for iColumn in listColumnIndexes] for listRow in listStep0005Rows]
+
+
+def sanitize_delivery_center_filename(pszCenterName: str) -> str:
+    """配送センター名をWindowsで安全なファイル名部分へ変換します。"""
+    pszSafeName: str = pszCenterName.strip().replace("(", "_").replace("（", "_")
+    pszSafeName = pszSafeName.replace(")", "").replace("）", "")
+    pszSafeName = re.sub(r'[\\/:*?"<>|]', "_", pszSafeName)
+    pszSafeName = re.sub(r"_+", "_", pszSafeName).strip(" ._")
+    if not pszSafeName:
+        raise ValueError("配送センター名をファイル名へ変換できません。")
+    return pszSafeName
+
+
+def save_step0006_excel_template(objOutputPath: Path, listRows: list[list[str]]) -> None:
+    """抽出した2行ヘッダー形式の処理0006 Excelを保存します。"""
+    objWorkbook: Workbook = Workbook()
+    objWorksheet: Worksheet = objWorkbook.active
+    for iRow, listRow in enumerate(listRows, start=1):
+        listValues: list[object] = listRow.copy()
+        if iRow >= 3 and listValues[0]:
+            listValues[0] = datetime.strptime(str(listValues[0]), "%Y/%m/%d").date()
+        for iColumn in range(len(STEP0002_HEADERS), len(listValues)):
+            if iRow >= 3 and str(listValues[iColumn]).isdigit():
+                listValues[iColumn] = int(str(listValues[iColumn]))
+        objWorksheet.append(listValues)
+        if iRow == 1:
+            for iColumn in range(len(STEP0002_HEADERS) + 1, len(listValues) + 1):
+                objWorksheet.cell(row=1, column=iColumn).number_format = "@"
+        elif iRow >= 3:
+            objWorksheet.cell(row=iRow, column=1).number_format = "yyyy/mm/dd"
+            objWorksheet.cell(row=iRow, column=5).number_format = "@"
+            objWorksheet.cell(row=iRow, column=6).number_format = "@"
+    objWorkbook.save(objOutputPath)
+
+
+def save_step0006_tsv_template(objOutputPath: Path, listRows: list[list[str]]) -> None:
+    """抽出した2行ヘッダー形式の処理0006 TSVを保存します。"""
+    with objOutputPath.open(mode="w", encoding="utf-8", newline="") as objFile:
+        csv.writer(objFile, delimiter="\t", lineterminator="\r\n").writerows(listRows)
+
+
+def replace_output_file_set(dictTemporaryOutputs: dict[Path, Path]) -> None:
+    """処理0006の全出力を置換し、失敗時は以前の状態へ戻します。"""
+    dictBackups: dict[Path, Path] = {}
+    listReplaced: list[Path] = []
+    try:
+        for objOutputPath in dictTemporaryOutputs:
+            if objOutputPath.exists():
+                objBackupPath: Path = create_temporary_path(objOutputPath, ".backup")
+                shutil.copy2(objOutputPath, objBackupPath)
+                dictBackups[objOutputPath] = objBackupPath
+        for objOutputPath, objTemporaryPath in dictTemporaryOutputs.items():
+            os.replace(objTemporaryPath, objOutputPath)
+            listReplaced.append(objOutputPath)
+    except Exception:
+        for objOutputPath in reversed(listReplaced):
+            objBackupPath = dictBackups.get(objOutputPath)
+            if objBackupPath is not None and objBackupPath.exists():
+                os.replace(objBackupPath, objOutputPath)
+            elif objOutputPath.exists():
+                objOutputPath.unlink()
+        raise
+    finally:
+        for objPath in [*dictBackups.values(), *dictTemporaryOutputs.values()]:
+            if objPath.exists():
+                objPath.unlink()
+
+
+def build_step0006_all_stores_rows(
+    listStep0005Rows: list[list[str]], listMappings: list[tuple[str, str, str]]
+) -> list[list[str]]:
+    """対応表にある全店舗を残した処理0006-1を構築します。"""
+    return select_step0006_columns(
+        listStep0005Rows, {pszCode for _, pszCode, _ in listMappings}
+    )
+
+
+def build_step0006_center_rows(
+    listStep0005Rows: list[list[str]], setCenterStoreCodes: set[str]
+) -> list[list[str]]:
+    """1つの配送センターの店舗列を残した処理0006-2を構築します。"""
+    return select_step0006_columns(listStep0005Rows, setCenterStoreCodes)
+
+
+def center_has_order_quantity(listCenterRows: list[list[str]]) -> bool:
+    """配送センターの店舗数量に1つでも値があるか確認します。"""
+    return any(
+        pszValue.strip()
+        for listRow in listCenterRows[2:]
+        for pszValue in listRow[len(STEP0002_HEADERS):]
+    )
+
+
+def process_step0006_files(
+    pszInputFileFullPath: str,
+    objStep0005ExcelPath: Path,
+    objStep0005TsvPath: Path,
+    objMappingPath: Path,
+) -> tuple[list[Path], list[str]]:
+    """処理0005と対応表から全店舗版と配送センター別の処理0006を作ります。"""
+    try:
+        listExcelRows = read_step0005_excel_table(objStep0005ExcelPath)
+        listTsvRows = read_step0005_tsv_table(objStep0005TsvPath)
+        validate_step0005_tables_match(listExcelRows, listTsvRows)
+        listMappings = read_area_store_mapping(objMappingPath)
+        setInputCodes: set[str] = set(listExcelRows[0][len(STEP0002_HEADERS):])
+        setMappedInputCodes: set[str] = {
+            pszCode for _, pszCode, _ in listMappings if pszCode in setInputCodes
+        }
+        if not setMappedInputCodes:
+            raise ValueError("処理0005と対応表で一致する店舗コードがありません。")
+
+        dictCenterCodes: dict[str, set[str]] = {}
+        for pszCenter, pszCode, _ in listMappings:
+            dictCenterCodes.setdefault(pszCenter, set()).add(pszCode)
+        dictSafeNames: dict[str, str] = {
+            pszCenter: sanitize_delivery_center_filename(pszCenter)
+            for pszCenter in dictCenterCodes
+        }
+        if len(set(dictSafeNames.values())) != len(dictSafeNames):
+            raise ValueError("配送センター名のファイル名が重複します。")
+
+        objInputPath = Path(pszInputFileFullPath)
+        objExcelOutputPath = objInputPath.with_name(objInputPath.stem + "_step0006.xlsx")
+        objTsvOutputPath = objInputPath.with_name(objInputPath.stem + "_step0006.tsv")
+        dictOutputRows: dict[Path, list[list[str]]] = {
+            objExcelOutputPath: build_step0006_all_stores_rows(listExcelRows, listMappings),
+        }
+        dictOutputRows[objTsvOutputPath] = dictOutputRows[objExcelOutputPath]
+        listWarnings: list[str] = []
+        for pszCenter, setCodes in dictCenterCodes.items():
+            listCenterRows = build_step0006_center_rows(listExcelRows, setCodes)
+            if len(listCenterRows[0]) == len(STEP0002_HEADERS):
+                listWarnings.append(
+                    f'警告: 配送センター「{pszCenter}」の店舗コード列は処理0005にありません。'
+                )
+                continue
+            if not center_has_order_quantity(listCenterRows):
+                listWarnings.append(
+                    f'警告: 配送センター「{pszCenter}」の店舗数量はすべて空欄ですが、XLSX・TSVを作成しました。'
+                )
+            pszCenterBaseName: str = (
+                objInputPath.stem + "_step0006_" + dictSafeNames[pszCenter]
+            )
+            dictOutputRows[objInputPath.with_name(pszCenterBaseName + ".xlsx")] = listCenterRows
+            dictOutputRows[objInputPath.with_name(pszCenterBaseName + ".tsv")] = listCenterRows
+
+        setCenterOutputCodes: set[str] = set()
+        for pszCenter, setCodes in dictCenterCodes.items():
+            setCenterOutputCodes.update(setCodes & setInputCodes)
+        if setCenterOutputCodes != setMappedInputCodes:
+            raise ValueError("全店舗版と配送センター別版の店舗コードが一致しません。")
+
+        dictTemporaryOutputs: dict[Path, Path] = {}
+        try:
+            for objOutputPath, listRows in dictOutputRows.items():
+                objTemporaryPath = create_temporary_path(objOutputPath, objOutputPath.suffix)
+                dictTemporaryOutputs[objOutputPath] = objTemporaryPath
+                if objOutputPath.suffix == ".xlsx":
+                    save_step0006_excel_template(objTemporaryPath, listRows)
+                else:
+                    save_step0006_tsv_template(objTemporaryPath, listRows)
+            replace_output_file_set(dictTemporaryOutputs)
+        finally:
+            for objTemporaryPath in dictTemporaryOutputs.values():
+                if objTemporaryPath.exists():
+                    objTemporaryPath.unlink()
+        return list(dictOutputRows), listWarnings
+    except Exception as objException:
+        raise Step0006Error(str(objException)) from objException
+
+
+def process_input_file(
+    pszInputFileFullPath: str,
+    objStartMonday: date,
+    objMappingPath: Path | None = None,
+) -> None:
+    """入力から処理0001～処理0006のXLSX・TSVを作成します。"""
     validate_start_monday(objStartMonday)
+    if objMappingPath is None:
+        objMappingPath = get_default_mapping_file_path()
     pszValidatedPath: str = validate_input_path(pszInputFileFullPath)
     pszExtension: str = os.path.splitext(pszValidatedPath)[1].lower()
     if pszExtension == ".xlsx":
@@ -1180,6 +1505,12 @@ def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
             objStartMonday,
         )
     )
+    listStep0006OutputPaths, listStep0006Warnings = process_step0006_files(
+        pszValidatedPath,
+        objStep0005ExcelPath,
+        objStep0005TsvPath,
+        objMappingPath,
+    )
     remove_old_error_file(pszValidatedPath)
     print("朝日注文テンプレートファイルを作成しました。")
     print("Input: " + pszValidatedPath)
@@ -1194,24 +1525,62 @@ def process_input_file(pszInputFileFullPath: str, objStartMonday: date) -> None:
     print("Step0004 TSV: " + str(objStep0004TsvPath))
     print("Step0005 Excel: " + str(objStep0005ExcelPath))
     print("Step0005 TSV: " + str(objStep0005TsvPath))
+    print("Mapping: " + str(objMappingPath))
+    for objStep0006OutputPath in listStep0006OutputPaths:
+        print("Step0006: " + str(objStep0006OutputPath))
+    for pszWarning in listStep0006Warnings:
+        print(pszWarning)
     print("Products: " + str(iProductCount))
     print("Step0005 Rows: " + str(iStep0005RowCount))
 
 
+def parse_command_line_arguments() -> tuple[str, str | None, Path]:
+    """入力、開始月曜日、対応表のコマンドライン引数を解析します。"""
+    pszStartMonday: str | None = None
+    objMappingPath: Path = get_default_mapping_file_path()
+    listInputPaths: list[str] = []
+    iArgument: int = 1
+    while iArgument < len(sys.argv):
+        pszArgument: str = sys.argv[iArgument]
+        if pszArgument in ("--start-monday", "--mapping-file"):
+            if iArgument + 1 >= len(sys.argv):
+                raise ValueError(pszArgument + "の値が指定されていません。")
+            pszValue: str = sys.argv[iArgument + 1]
+            if pszArgument == "--start-monday":
+                if pszStartMonday is not None:
+                    raise ValueError("--start-mondayが重複しています。")
+                pszStartMonday = pszValue
+            else:
+                if objMappingPath != get_default_mapping_file_path():
+                    raise ValueError("--mapping-fileが重複しています。")
+                objMappingPath = Path(pszValue).expanduser().resolve()
+            iArgument += 2
+            continue
+        if pszArgument.startswith("--"):
+            raise ValueError("未対応のオプションです。Option = " + pszArgument)
+        listInputPaths.append(pszArgument)
+        iArgument += 1
+    if len(listInputPaths) != 1:
+        raise ValueError("入力ファイルパスは1つ指定してください。")
+    return listInputPaths[0], pszStartMonday, objMappingPath
+
+
 def main() -> int:
     """引数を確認して処理し、成功0・失敗1の終了コードを返します。"""
-    bHasStartMondayArgument: bool = len(sys.argv) == 4 and sys.argv[1] == "--start-monday"
-    bHasOnlyInputArgument: bool = len(sys.argv) == 2
-    if not bHasStartMondayArgument and not bHasOnlyInputArgument:
+    try:
+        pszInputFileFullPath, pszStartMondayArgument, objMappingPath = (
+            parse_command_line_arguments()
+        )
+    except ValueError as objException:
         pszScriptFileName: str = os.path.basename(__file__)
         pszErrorMessage: str = (
-            "Error: 入力ファイルパスと開始月曜日を正しく指定してください。\n"
+            "Error: " + str(objException) + "\n"
             + "Usage: python "
             + pszScriptFileName
-            + " <input_file_path>\n"
+            + " [--mapping-file <mapping_path>] <input_file_path>\n"
             + "With date: python "
             + pszScriptFileName
-            + " --start-monday YYYY-MM-DD <input_file_path>\n"
+            + " --start-monday YYYY-MM-DD [--mapping-file <mapping_path>] <input_file_path>\n"
         )
         print(pszErrorMessage, file=sys.stderr, end="")
         pszErrorFileFullPath: str = os.path.splitext(pszScriptFileName)[0] + "_error_argument.txt"
@@ -1223,11 +1592,10 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
-    pszInputFileFullPath: str = sys.argv[3] if bHasStartMondayArgument else sys.argv[1]
     try:
         try:
-            if bHasStartMondayArgument:
-                objStartMonday: date = parse_start_monday(sys.argv[2])
+            if pszStartMondayArgument is not None:
+                objStartMonday: date = parse_start_monday(pszStartMondayArgument)
             else:
                 objSelectedMonday: date | None = select_start_monday()
                 if objSelectedMonday is None:
@@ -1240,7 +1608,14 @@ def main() -> int:
             raise
         except Exception as objException:
             raise Step0004Error(str(objException)) from objException
-        process_input_file(pszInputFileFullPath, objStartMonday)
+        process_input_file(pszInputFileFullPath, objStartMonday, objMappingPath)
+    except Step0006Error as objException:
+        report_processing_error(
+            pszInputFileFullPath,
+            "朝日注文テンプレート処理0006",
+            str(objException),
+        )
+        return 1
     except Step0005Error as objException:
         report_processing_error(
             pszInputFileFullPath,
