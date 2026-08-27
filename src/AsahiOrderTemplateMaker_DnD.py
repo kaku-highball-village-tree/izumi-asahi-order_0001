@@ -15,7 +15,11 @@ import win32api
 import win32con
 import win32gui
 
-from AsahiOrderTemplateMaker_Cmd import report_processing_error, select_start_monday
+from AsahiOrderTemplateMaker_Cmd import (
+    PRODUCT_DELETE_PROBABILITY,
+    report_processing_error,
+    select_start_monday,
+)
 
 
 WINDOW_TITLE: str = "Asahi Order Template Maker (Drag & Drop)"
@@ -109,6 +113,9 @@ def draw_instruction_text(iWindowHandle: int) -> None:
     pszInstructionText: str = (
         "Excel、TSV、またはCSVファイルをこのウィンドウにドラッグ＆ドロップしてください。\n"
         "開始月曜日をカレンダーから選択します。初期選択は来週の月曜日です。\n"
+        "step0005では商品ごとに"
+        + str(PRODUCT_DELETE_PROBABILITY * 100)
+        + "%の独立した削除抽選を行います。\n"
         "プログラムと同じフォルダーの配送センター・店舗対応表を使用します。\n"
         "同じフォルダーにstep0001～step0007のXLSX・TSVを作成します。\n"
         "step0007では配送センターごとに発注のない商品を除外します。\n"

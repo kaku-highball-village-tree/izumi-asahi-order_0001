@@ -9,6 +9,7 @@
 
 import csv
 import hashlib
+import math
 import os
 import random
 import re
@@ -81,6 +82,8 @@ STORE_DEFINITIONS: tuple[tuple[str, str], ...] = (
 )
 SUPPORTED_EXTENSIONS: set[str] = {".xlsx", ".tsv", ".csv"}
 AREA_STORE_MAPPING_FILE_NAME: str = "AsahiOrderAreaStoreMapping_対応表.txt"
+# 0.25は25%の商品削除確率を意味します。
+PRODUCT_DELETE_PROBABILITY: float = 0.25
 
 
 class ProductRow:
@@ -125,6 +128,15 @@ def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
         objFile.write(pszErrorMessage.rstrip("\n") + "\n")
 
 
+def write_warning_text(pszOutputFileFullPath: str, pszWarningMessage: str) -> None:
+    """警告メッセージをUTF-8のテキストファイルへ上書き保存します。"""
+    pszDirectoryFullPath: str = os.path.dirname(pszOutputFileFullPath)
+    if pszDirectoryFullPath != "":
+        os.makedirs(pszDirectoryFullPath, exist_ok=True)
+    with open(pszOutputFileFullPath, mode="w", encoding="utf-8", newline="") as objFile:
+        objFile.write(pszWarningMessage.rstrip("\n") + "\n")
+
+
 def get_error_file_full_path(pszInputFileFullPath: str) -> str:
     """入力ファイルと同じフォルダーに作る_error.txtのパスを返します。"""
     pszDirectoryFullPath: str = os.path.dirname(os.path.abspath(pszInputFileFullPath))
@@ -132,6 +144,12 @@ def get_error_file_full_path(pszInputFileFullPath: str) -> str:
         os.path.basename(pszInputFileFullPath)
     )[0]
     return os.path.join(pszDirectoryFullPath, pszBaseNameWithoutExtension + "_error.txt")
+
+
+def get_step0005_warning_file_path(pszInputFileFullPath: str) -> Path:
+    """入力ファイルと同じフォルダーのstep0005_warning.txtパスを返します。"""
+    objInputPath: Path = Path(pszInputFileFullPath).resolve()
+    return objInputPath.with_name(objInputPath.stem + "_step0005_warning.txt")
 
 
 def report_processing_error(
@@ -846,6 +864,101 @@ def build_step0005_random_seed(
     return int.from_bytes(objDigest, byteorder="big", signed=False)
 
 
+def validate_product_delete_probability() -> None:
+    """商品削除確率が0.0～1.0の有限数か確認します。"""
+    if isinstance(PRODUCT_DELETE_PROBABILITY, bool) or not isinstance(
+        PRODUCT_DELETE_PROBABILITY, (int, float)
+    ):
+        raise ValueError("商品削除確率が数値ではありません。")
+    if not math.isfinite(PRODUCT_DELETE_PROBABILITY):
+        raise ValueError("商品削除確率が有限数ではありません。")
+    if not 0.0 <= PRODUCT_DELETE_PROBABILITY <= 1.0:
+        raise ValueError(
+            "商品削除確率は0.0～1.0で指定してください。Value = "
+            + str(PRODUCT_DELETE_PROBABILITY)
+        )
+
+
+def build_product_delete_random_seed(
+    pszInputFileFullPath: str, objStartMonday: date
+) -> int:
+    """入力名と開始月曜日から商品削除専用のSHA-256シードを作ります。"""
+    pszSeedText: str = (
+        Path(pszInputFileFullPath).stem
+        + "|"
+        + objStartMonday.isoformat()
+        + "|product-deletion"
+    )
+    objDigest: bytes = hashlib.sha256(pszSeedText.encode("utf-8")).digest()
+    return int.from_bytes(objDigest, byteorder="big", signed=False)
+
+
+def validate_step0005_product_groups(listStep0004Rows: list[list[str]]) -> None:
+    """処理0004のデータが商品ごとの月～日7行になっているか検証します。"""
+    validate_step0003_weekday_cycle(listStep0004Rows)
+    for iGroupStart in range(0, len(listStep0004Rows), len(WEEKDAYS)):
+        listGroup: list[list[str]] = listStep0004Rows[
+            iGroupStart:iGroupStart + len(WEEKDAYS)
+        ]
+        try:
+            objMonday: date = datetime.strptime(listGroup[0][0], "%Y/%m/%d").date()
+        except ValueError as objException:
+            raise ValueError(
+                "step0004の月曜日日付が不正です。行 = "
+                + str(iGroupStart + 2)
+            ) from objException
+        if objMonday.weekday() != 0:
+            raise ValueError(
+                "step0004の開始日が月曜日ではありません。行 = "
+                + str(iGroupStart + 2)
+            )
+        for iDay, listRow in enumerate(listGroup):
+            try:
+                objActualDate: date = datetime.strptime(listRow[0], "%Y/%m/%d").date()
+            except ValueError as objException:
+                raise ValueError(
+                    "step0004の日付が不正です。行 = "
+                    + str(iGroupStart + iDay + 2)
+                ) from objException
+            if objActualDate != objMonday + timedelta(days=iDay):
+                raise ValueError(
+                    "step0004の日付が月～日の連続日付ではありません。行 = "
+                    + str(iGroupStart + iDay + 2)
+                )
+        for iColumn, pszColumnName in ((4, "Ｐ品番"), (5, "APEX品番"), (6, "商品名")):
+            if not listGroup[0][iColumn].strip():
+                raise ValueError(
+                    "step0004の月曜日行の"
+                    + pszColumnName
+                    + "が空欄です。行 = "
+                    + str(iGroupStart + 2)
+                )
+
+
+def select_step0005_product_rows(
+    listStep0004Rows: list[list[str]],
+    pszInputFileFullPath: str,
+    objStartMonday: date,
+) -> tuple[list[list[str]], int, int]:
+    """商品ごとに独立抽選し、残す商品の月～日7行を返します。"""
+    validate_product_delete_probability()
+    validate_step0005_product_groups(listStep0004Rows)
+    objDeleteRandom = random.Random(
+        build_product_delete_random_seed(pszInputFileFullPath, objStartMonday)
+    )
+    listRetainedRows: list[list[str]] = []
+    iKeptProductCount: int = 0
+    iRemovedProductCount: int = 0
+    for iGroupStart in range(0, len(listStep0004Rows), len(WEEKDAYS)):
+        listGroup = listStep0004Rows[iGroupStart:iGroupStart + len(WEEKDAYS)]
+        if objDeleteRandom.random() < PRODUCT_DELETE_PROBABILITY:
+            iRemovedProductCount += 1
+        else:
+            listRetainedRows.extend(listRow.copy() for listRow in listGroup)
+            iKeptProductCount += 1
+    return listRetainedRows, iKeptProductCount, iRemovedProductCount
+
+
 def generate_store_random_value(objRandom: random.Random) -> int | None:
     """空欄70%、1が20%、2～5が各2.5%となる値を1つ抽選します。"""
     iRandomBucket: int = objRandom.randint(1, 40)
@@ -1094,7 +1207,7 @@ def process_step0005_files(
     objStep0004ExcelPath: Path,
     objStep0004TsvPath: Path,
     objStartMonday: date,
-) -> tuple[Path, Path, int]:
+) -> tuple[Path, Path, int, int, int, Path | None]:
     """処理0004の両出力を比較し、100店舗列を持つ処理0005を作成します。"""
     try:
         listExcelRows: list[list[str]] = read_step0002_excel_rows(
@@ -1104,8 +1217,13 @@ def process_step0005_files(
             objStep0004TsvPath, "step0004"
         )
         validate_step0002_outputs_match(listExcelRows, listTsvRows, "step0004")
+        listRetainedRows, iKeptProductCount, iRemovedProductCount = (
+            select_step0005_product_rows(
+                listExcelRows, pszInputFileFullPath, objStartMonday
+            )
+        )
         listStep0005Rows: list[list[object]] = build_step0005_rows(
-            listExcelRows, pszInputFileFullPath, objStartMonday
+            listRetainedRows, pszInputFileFullPath, objStartMonday
         )
 
         objExcelOutputPath, objTsvOutputPath = get_step0005_output_file_paths(
@@ -1113,20 +1231,64 @@ def process_step0005_files(
         )
         objTemporaryExcelPath: Path = create_temporary_path(objExcelOutputPath, ".xlsx")
         objTemporaryTsvPath: Path = create_temporary_path(objTsvOutputPath, ".tsv")
+        objWarningPath: Path = get_step0005_warning_file_path(pszInputFileFullPath)
+        objTemporaryWarningPath: Path | None = None
         try:
             save_step0005_excel_template(objTemporaryExcelPath, listStep0005Rows)
             save_step0005_tsv_template(objTemporaryTsvPath, listStep0005Rows)
-            replace_output_files(
+            if iKeptProductCount == 0 and iRemovedProductCount > 0:
+                objTemporaryWarningPath = create_temporary_path(objWarningPath, ".txt")
+                pszWarningMessage: str = (
+                    "処理結果: 警告\n"
+                    + "入力ファイル: "
+                    + os.path.abspath(pszInputFileFullPath)
+                    + "\n発生した処理: 朝日注文テンプレート処理0005\n"
+                    + "警告内容: 商品削除抽選の結果、すべての商品が削除されました。"
+                    + "処理0005はヘッダー2行だけで作成しました。\n"
+                    + "商品削除確率: "
+                    + str(PRODUCT_DELETE_PROBABILITY)
+                    + " ("
+                    + str(PRODUCT_DELETE_PROBABILITY * 100)
+                    + "%)\n入力商品数: "
+                    + str(iKeptProductCount + iRemovedProductCount)
+                    + "\n残存商品数: 0\n削除商品数: "
+                    + str(iRemovedProductCount)
+                )
+                write_warning_text(str(objTemporaryWarningPath), pszWarningMessage)
+                replace_output_file_set(
+                    {
+                        objExcelOutputPath: objTemporaryExcelPath,
+                        objTsvOutputPath: objTemporaryTsvPath,
+                        objWarningPath: objTemporaryWarningPath,
+                    }
+                )
+            else:
+                replace_output_files(
+                    objTemporaryExcelPath,
+                    objTemporaryTsvPath,
+                    objExcelOutputPath,
+                    objTsvOutputPath,
+                )
+                if objWarningPath.exists():
+                    objWarningPath.unlink()
+        finally:
+            for objTemporaryPath in (
                 objTemporaryExcelPath,
                 objTemporaryTsvPath,
-                objExcelOutputPath,
-                objTsvOutputPath,
-            )
-        finally:
-            for objTemporaryPath in (objTemporaryExcelPath, objTemporaryTsvPath):
+                objTemporaryWarningPath,
+            ):
+                if objTemporaryPath is None:
+                    continue
                 if objTemporaryPath.exists():
                     objTemporaryPath.unlink()
-        return objExcelOutputPath, objTsvOutputPath, len(listStep0005Rows)
+        return (
+            objExcelOutputPath,
+            objTsvOutputPath,
+            len(listStep0005Rows),
+            iKeptProductCount,
+            iRemovedProductCount,
+            objWarningPath if iKeptProductCount == 0 and iRemovedProductCount > 0 else None,
+        )
     except Exception as objException:
         raise Step0005Error(str(objException)) from objException
 
@@ -1673,7 +1835,14 @@ def process_input_file(
             objStartMonday,
         )
     )
-    objStep0005ExcelPath, objStep0005TsvPath, iStep0005RowCount = (
+    (
+        objStep0005ExcelPath,
+        objStep0005TsvPath,
+        iStep0005RowCount,
+        iStep0005KeptProductCount,
+        iStep0005RemovedProductCount,
+        objStep0005WarningPath,
+    ) = (
         process_step0005_files(
             pszValidatedPath,
             objStep0004ExcelPath,
@@ -1705,6 +1874,24 @@ def process_input_file(
     print("Step0004 TSV: " + str(objStep0004TsvPath))
     print("Step0005 Excel: " + str(objStep0005ExcelPath))
     print("Step0005 TSV: " + str(objStep0005TsvPath))
+    print("Step0005 Product Delete Probability: " + str(PRODUCT_DELETE_PROBABILITY))
+    print(
+        "Step0005 Product Delete Percent: "
+        + str(PRODUCT_DELETE_PROBABILITY * 100)
+        + "%"
+    )
+    print(
+        "Step0005 Input Products: "
+        + str(iStep0005KeptProductCount + iStep0005RemovedProductCount)
+    )
+    print("Step0005 Kept Products: " + str(iStep0005KeptProductCount))
+    print("Step0005 Removed Products: " + str(iStep0005RemovedProductCount))
+    if objStep0005WarningPath is not None:
+        print(
+            "警告: 商品削除抽選の結果、すべての商品が削除されました。"
+            + "処理0005はヘッダー2行だけで作成しました。"
+        )
+        print("Step0005 Warning: " + str(objStep0005WarningPath))
     print("Mapping: " + str(objMappingPath))
     for objStep0006OutputPath in listStep0006OutputPaths:
         print("Step0006: " + str(objStep0006OutputPath))
