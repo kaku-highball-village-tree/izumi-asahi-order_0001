@@ -112,6 +112,10 @@ class Step0006Error(Exception):
     """処理0006で発生したエラーであることを呼び出し元へ伝えます。"""
 
 
+class Step0007Error(Exception):
+    """処理0007で発生したエラーであることを呼び出し元へ伝えます。"""
+
+
 def write_error_text(pszOutputFileFullPath: str, pszErrorMessage: str) -> None:
     """エラーメッセージをUTF-8のテキストファイルへ上書き保存します。"""
     pszDirectoryFullPath: str = os.path.dirname(pszOutputFileFullPath)
@@ -1440,12 +1444,184 @@ def process_step0006_files(
         raise Step0006Error(str(objException)) from objException
 
 
+def validate_step0007_product_groups(
+    listRows: list[list[str]], pszCenterName: str
+) -> None:
+    """配送センター別データが商品ごとの月～日7行になっているか検証します。"""
+    validate_step0005_table(listRows, "step0006「" + pszCenterName + "」")
+    listDataRows: list[list[str]] = listRows[2:]
+    if len(listDataRows) % len(WEEKDAYS) != 0:
+        raise ValueError(
+            f'配送センター「{pszCenterName}」のstep0006データ行数が7の倍数ではありません。'
+        )
+    for iGroupStart in range(0, len(listDataRows), len(WEEKDAYS)):
+        listGroup: list[list[str]] = listDataRows[iGroupStart:iGroupStart + len(WEEKDAYS)]
+        for iDay, (listRow, pszExpectedWeekday) in enumerate(zip(listGroup, WEEKDAYS)):
+            iFileRow: int = iGroupStart + iDay + 3
+            if listRow[1] != pszExpectedWeekday:
+                raise ValueError(
+                    f'配送センター「{pszCenterName}」の{iFileRow}行目の曜日が'
+                    f'「{pszExpectedWeekday}」ではありません。'
+                )
+        try:
+            objMonday: date = datetime.strptime(listGroup[0][0], "%Y/%m/%d").date()
+        except ValueError as objException:
+            raise ValueError(
+                f'配送センター「{pszCenterName}」の月曜日日付が不正です。'
+            ) from objException
+        if objMonday.weekday() != 0:
+            raise ValueError(
+                f'配送センター「{pszCenterName}」の開始日が月曜日ではありません。'
+            )
+        for iDay, listRow in enumerate(listGroup):
+            try:
+                objActualDate: date = datetime.strptime(listRow[0], "%Y/%m/%d").date()
+            except ValueError as objException:
+                raise ValueError(
+                    f'配送センター「{pszCenterName}」の日付が不正です。'
+                ) from objException
+            if objActualDate != objMonday + timedelta(days=iDay):
+                raise ValueError(
+                    f'配送センター「{pszCenterName}」の日付が月～日の連続日付ではありません。'
+                )
+        for iColumn, pszColumnName in ((4, "Ｐ品番"), (5, "APEX品番"), (6, "商品名")):
+            if not listGroup[0][iColumn].strip():
+                raise ValueError(
+                    f'配送センター「{pszCenterName}」の月曜日行の{pszColumnName}が空欄です。'
+                )
+
+
+def product_week_has_order(listProductWeekRows: list[list[str]]) -> bool:
+    """1商品分7行のO列以降に空欄以外の値があるか返します。"""
+    return any(
+        pszValue.strip() != ""
+        for listRow in listProductWeekRows
+        for pszValue in listRow[len(STEP0002_HEADERS):]
+    )
+
+
+def build_step0007_rows(
+    listStep0006Rows: list[list[str]], pszCenterName: str
+) -> tuple[list[list[str]], int, int]:
+    """発注がある商品の月～日7行だけを残した処理0007を構築します。"""
+    validate_step0007_product_groups(listStep0006Rows, pszCenterName)
+    listOutputRows: list[list[str]] = [
+        listStep0006Rows[0].copy(), listStep0006Rows[1].copy()
+    ]
+    iKeptProductCount: int = 0
+    iRemovedProductCount: int = 0
+    listDataRows: list[list[str]] = listStep0006Rows[2:]
+    for iGroupStart in range(0, len(listDataRows), len(WEEKDAYS)):
+        listGroup = listDataRows[iGroupStart:iGroupStart + len(WEEKDAYS)]
+        if product_week_has_order(listGroup):
+            listOutputRows.extend(listRow.copy() for listRow in listGroup)
+            iKeptProductCount += 1
+        else:
+            iRemovedProductCount += 1
+    return listOutputRows, iKeptProductCount, iRemovedProductCount
+
+
+def get_step0007_output_path(objStep0006Path: Path) -> Path:
+    """配送センター別step0006パスからstep0007パスを作ります。"""
+    pszMarker: str = "_step0006_"
+    if pszMarker not in objStep0006Path.stem:
+        raise ValueError(
+            "配送センター別step0006のファイル名ではありません。Path = "
+            + str(objStep0006Path)
+        )
+    pszOutputStem: str = objStep0006Path.stem.replace(pszMarker, "_step0007_", 1)
+    return objStep0006Path.with_name(pszOutputStem + objStep0006Path.suffix)
+
+
+def process_step0007_files(
+    pszInputFileFullPath: str, listStep0006OutputPaths: list[Path]
+) -> tuple[list[Path], list[str]]:
+    """配送センター別step0006から発注のある商品だけのstep0007を作ります。"""
+    try:
+        objInputPath: Path = Path(pszInputFileFullPath)
+        pszAllStoresStem: str = objInputPath.stem + "_step0006"
+        dictCenterInputPaths: dict[str, dict[str, Path]] = {}
+        for objPath in listStep0006OutputPaths:
+            if objPath.stem == pszAllStoresStem:
+                continue
+            pszMarker: str = "_step0006_"
+            if pszMarker not in objPath.stem:
+                continue
+            pszCenterName: str = objPath.stem.split(pszMarker, 1)[1]
+            dictCenterInputPaths.setdefault(pszCenterName, {})[objPath.suffix] = objPath
+        if not dictCenterInputPaths:
+            raise ValueError("処理0007の対象となる配送センター別step0006がありません。")
+
+        dictOutputRows: dict[Path, list[list[str]]] = {}
+        listWarnings: list[str] = []
+        for pszCenterName, dictPaths in dictCenterInputPaths.items():
+            if set(dictPaths) != {".xlsx", ".tsv"}:
+                raise ValueError(
+                    f'配送センター「{pszCenterName}」のstep0006 XLSX・TSVが揃っていません。'
+                )
+            listExcelRows = read_step0005_excel_table(dictPaths[".xlsx"])
+            listTsvRows = read_step0005_tsv_table(dictPaths[".tsv"])
+            validate_step0005_tables_match(listExcelRows, listTsvRows)
+            listStep0007Rows, iKeptCount, iRemovedCount = build_step0007_rows(
+                listExcelRows, pszCenterName
+            )
+            if iKeptCount == 0:
+                listWarnings.append(
+                    f'警告: 配送センター「{pszCenterName}」には発注のある商品がありませんが、'
+                    "ヘッダー2行のXLSX・TSVを作成しました。"
+                )
+            print(
+                f'Step0007 Center: {pszCenterName}, Kept Products: {iKeptCount}, '
+                f'Removed Products: {iRemovedCount}'
+            )
+            objExcelOutputPath = get_step0007_output_path(dictPaths[".xlsx"])
+            objTsvOutputPath = get_step0007_output_path(dictPaths[".tsv"])
+            dictOutputRows[objExcelOutputPath] = listStep0007Rows
+            dictOutputRows[objTsvOutputPath] = listStep0007Rows
+
+        dictTemporaryOutputs: dict[Path, Path] = {}
+        try:
+            for objOutputPath, listRows in dictOutputRows.items():
+                objTemporaryPath = create_temporary_path(objOutputPath, objOutputPath.suffix)
+                dictTemporaryOutputs[objOutputPath] = objTemporaryPath
+                if objOutputPath.suffix == ".xlsx":
+                    save_step0006_excel_template(objTemporaryPath, listRows)
+                else:
+                    save_step0006_tsv_template(objTemporaryPath, listRows)
+            for pszCenterName, dictPaths in dictCenterInputPaths.items():
+                objFinalExcelPath = get_step0007_output_path(dictPaths[".xlsx"])
+                objFinalTsvPath = get_step0007_output_path(dictPaths[".tsv"])
+                listSavedExcelRows = read_step0005_excel_table(
+                    dictTemporaryOutputs[objFinalExcelPath]
+                )
+                listSavedTsvRows = read_step0005_tsv_table(
+                    dictTemporaryOutputs[objFinalTsvPath]
+                )
+                validate_step0005_tables_match(listSavedExcelRows, listSavedTsvRows)
+                validate_step0007_product_groups(listSavedExcelRows, pszCenterName)
+                for iStart in range(2, len(listSavedExcelRows), len(WEEKDAYS)):
+                    if not product_week_has_order(
+                        listSavedExcelRows[iStart:iStart + len(WEEKDAYS)]
+                    ):
+                        raise ValueError(
+                            f'配送センター「{pszCenterName}」のstep0007に発注のない商品が残っています。'
+                        )
+            replace_output_file_set(dictTemporaryOutputs)
+        finally:
+            for objTemporaryPath in dictTemporaryOutputs.values():
+                if objTemporaryPath.exists():
+                    objTemporaryPath.unlink()
+        return list(dictOutputRows), listWarnings
+    except Exception as objException:
+        raise Step0007Error(str(objException)) from objException
+
+
 def process_input_file(
     pszInputFileFullPath: str,
     objStartMonday: date,
     objMappingPath: Path | None = None,
 ) -> None:
-    """入力から処理0001～処理0006のXLSX・TSVを作成します。"""
+    """入力から処理0001～処理0007のXLSX・TSVを作成します。"""
     validate_start_monday(objStartMonday)
     if objMappingPath is None:
         objMappingPath = get_default_mapping_file_path()
@@ -1511,6 +1687,10 @@ def process_input_file(
         objStep0005TsvPath,
         objMappingPath,
     )
+    listStep0007OutputPaths, listStep0007Warnings = process_step0007_files(
+        pszValidatedPath,
+        listStep0006OutputPaths,
+    )
     remove_old_error_file(pszValidatedPath)
     print("朝日注文テンプレートファイルを作成しました。")
     print("Input: " + pszValidatedPath)
@@ -1528,7 +1708,11 @@ def process_input_file(
     print("Mapping: " + str(objMappingPath))
     for objStep0006OutputPath in listStep0006OutputPaths:
         print("Step0006: " + str(objStep0006OutputPath))
+    for objStep0007OutputPath in listStep0007OutputPaths:
+        print("Step0007: " + str(objStep0007OutputPath))
     for pszWarning in listStep0006Warnings:
+        print(pszWarning)
+    for pszWarning in listStep0007Warnings:
         print(pszWarning)
     print("Products: " + str(iProductCount))
     print("Step0005 Rows: " + str(iStep0005RowCount))
@@ -1609,6 +1793,13 @@ def main() -> int:
         except Exception as objException:
             raise Step0004Error(str(objException)) from objException
         process_input_file(pszInputFileFullPath, objStartMonday, objMappingPath)
+    except Step0007Error as objException:
+        report_processing_error(
+            pszInputFileFullPath,
+            "朝日注文テンプレート処理0007",
+            str(objException),
+        )
+        return 1
     except Step0006Error as objException:
         report_processing_error(
             pszInputFileFullPath,
